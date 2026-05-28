@@ -130,6 +130,12 @@ def main(argv=None):
         run_gui()
         return
 
+    # Pre-compile Numba kernels (blocking for CLI so first run is fast)
+    from .warmup import warmup
+    print("Pre-compiling Numba kernels…", end=" ", flush=True)
+    dt_warmup = warmup()
+    print(f"done ({dt_warmup:.1f}s)")
+
     total_particles = None if args.grand_canonical else args.N
 
     # Print header

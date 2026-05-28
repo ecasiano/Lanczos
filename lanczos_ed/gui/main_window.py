@@ -673,7 +673,24 @@ class MainWindow(QMainWindow):
         results_panel = self._build_results_panel()
         main_layout.addWidget(results_panel, stretch=1)
 
-        self.statusBar().showMessage("Ready")
+        self.statusBar().showMessage("Compiling Numba kernels…")
+        self._start_warmup()
+
+    # ------------------------------------------------------------------
+    # Numba warmup
+    # ------------------------------------------------------------------
+    def _start_warmup(self):
+        """Pre-compile Numba JIT kernels in a background thread."""
+        from PySide6.QtCore import QTimer
+        from ..warmup import warmup_async
+
+        def _on_done(elapsed):
+            # Marshal the status-bar update to the main (GUI) thread
+            QTimer.singleShot(0, lambda: self.statusBar().showMessage(
+                f"Ready  (Numba compiled in {elapsed:.1f}s)", 8000
+            ))
+
+        warmup_async(on_done=_on_done)
 
     def _build_parameter_panel(self) -> QGroupBox:
         """Create the parameter input panel."""
