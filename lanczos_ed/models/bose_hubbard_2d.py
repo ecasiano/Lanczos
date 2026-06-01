@@ -249,15 +249,18 @@ class BoseHubbard2D:
                 if x < L - 1:
                     # Interior bond (always present)
                     bonds.append((site, site + 1))
-                elif self.boundary == 'pbc' and L > 2:
+                elif self.boundary == 'pbc':
                     # PBC wrap: (L-1, y) -- (0, y)
+                    # For L=2 this reconnects the same pair as the
+                    # interior bond, doubling the hopping — correct
+                    # for a torus where each site has z=4 neighbors.
                     bonds.append((site, y * L))
 
                 # --- Vertical bond: (x, y) -- (x, y+1) ---
                 if y < L - 1:
                     # Interior bond (always present)
                     bonds.append((site, site + L))
-                elif self.boundary == 'pbc' and L > 2:
+                elif self.boundary == 'pbc':
                     # PBC wrap: (x, L-1) -- (x, 0)
                     bonds.append((site, x))
 

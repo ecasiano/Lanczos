@@ -252,19 +252,19 @@ class BoseHubbard3D:
                     # --- x-direction bond ---
                     if x < L - 1:
                         bonds.append((site, site + 1))
-                    elif self.boundary == 'pbc' and L > 2:
+                    elif self.boundary == 'pbc':
                         bonds.append((site, y * L + z * L2))
 
                     # --- y-direction bond ---
                     if y < L - 1:
                         bonds.append((site, site + L))
-                    elif self.boundary == 'pbc' and L > 2:
+                    elif self.boundary == 'pbc':
                         bonds.append((site, x + z * L2))
 
                     # --- z-direction bond ---
                     if z < L - 1:
                         bonds.append((site, site + L2))
-                    elif self.boundary == 'pbc' and L > 2:
+                    elif self.boundary == 'pbc':
                         bonds.append((site, x + y * L))
 
         return bonds

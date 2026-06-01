@@ -167,11 +167,12 @@ class BoseHubbard1D:
         For a 1D chain of L sites:
             OBC: bonds (0,1), (1,2), ..., (L-2, L-1)
             PBC: same as OBC plus the wrap-around bond (L-1, 0)
-                 (excluded for L=2 to avoid double-counting the single bond)
+                 For L=2 this reconnects the same pair, doubling
+                 the hopping — correct for a ring where z=2.
         """
         bonds = [(site, site + 1) for site in range(self.num_sites - 1)]
 
-        if self.boundary == 'pbc' and self.num_sites > 2:
+        if self.boundary == 'pbc':
             bonds.append((self.num_sites - 1, 0))
 
         return bonds
