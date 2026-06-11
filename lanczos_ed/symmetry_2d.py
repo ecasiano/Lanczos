@@ -36,11 +36,16 @@ Translation operations:
     Tx: (x, y) → ((x+1) mod L, y)  — cyclic shift within each row
     Ty: (x, y) → (x, (y+1) mod L)  — cyclic shift of entire rows
 
-Unlike the 1D case where translation is a fast bitwise shift on the
-unary integer, 2D translations require:
-    1. Decode unary integer → occupation array
-    2. Permute the occupation array (row-wise for Tx, row-swap for Ty)
-    3. Re-encode occupation array → unary integer
+2D translations are implemented as bitwise operations on the unary
+integer, avoiding expensive decode→permute→encode:
+
+    Ty = reverse_shift^L  (move last L site-segments to LSB end)
+    Tx = per-row reverse_shift  (extract each row's bit segment,
+         apply 1D reverse shift, reassemble)
+
+This is analogous to the 1D case where translation is shift_v.
+The "reverse shift" moves the last site's segment (MSB end) to the
+front (LSB end), implementing a cyclic right rotation of sites.
 
 Reference:
     Sandvik, AIP Conf. Proc. 1297, 135 (2010) — general ED techniques
@@ -131,24 +136,100 @@ def translate_y_occ(occupation: tuple, L: int) -> tuple:
     return tuple(new_occ)
 
 
-def translate_x_integer(v: int, L: int, num_sites: int) -> int:
-    """Apply Tx to a unary-encoded integer.
+# =====================================================================
+# Bitwise translation operations on unary integers
+# =====================================================================
 
-    Decode → permute → re-encode.
+def _count_trailing_zeros(v: int) -> int:
+    """Count trailing zero bits (= occupation of first site)."""
+    if v == 0:
+        return 64
+    n = 0
+    while (v & 1) == 0:
+        n += 1
+        v >>= 1
+    return n
+
+
+def _reverse_shift(v: int, total_bits: int) -> int:
+    """Cyclic right shift: move last site segment (MSB) to front (LSB).
+
+    |n_0, n_1, ..., n_{L-1}⟩  →  |n_{L-1}, n_0, ..., n_{L-2}⟩
+
+    The last site's segment is at the MSB end: n_{L-1} zero-bits
+    followed by the topmost wall bit. We strip it and prepend at LSB.
     """
-    occ = unary_to_occupation(v, num_sites)
-    new_occ = translate_x_occ(occ, L)
-    return occupation_to_unary(new_occ)
+    # Strip MSB wall bit
+    v_stripped = v ^ (1 << (total_bits - 1))
+
+    # Count leading zeros from MSB downward = occupation of last site
+    n_last = 0
+    for bit_pos in range(total_bits - 2, -1, -1):
+        if v_stripped & (1 << bit_pos):
+            break
+        n_last += 1
+
+    # Lower bits encode sites 0..L-2
+    remaining_bits = total_bits - 1 - n_last
+    remaining = v_stripped & ((1 << remaining_bits) - 1)
+
+    # Shift remaining up, place new site at LSB: n_last zeros + wall
+    result = remaining << (n_last + 1)
+    result |= (1 << n_last)
+    return result
 
 
 def translate_y_integer(v: int, L: int, num_sites: int) -> int:
-    """Apply Ty to a unary-encoded integer.
+    """Apply Ty to a unary-encoded integer (bitwise, no decode).
 
-    Decode → permute → re-encode.
+    Ty = reverse_shift applied L times. Moves the last L site-segments
+    (= last row) to the front, implementing the cyclic row permutation.
     """
-    occ = unary_to_occupation(v, num_sites)
-    new_occ = translate_y_occ(occ, L)
-    return occupation_to_unary(new_occ)
+    total_bits = num_sites + bin(v).count('0') + 1  # N + L^2
+    # Actually, total_bits = number of bits in v (position of MSB + 1)
+    total_bits = v.bit_length()
+    for _ in range(L):
+        v = _reverse_shift(v, total_bits)
+    return v
+
+
+def translate_x_integer(v: int, L: int, num_sites: int) -> int:
+    """Apply Tx to a unary-encoded integer (bitwise, no decode).
+
+    Tx = per-row reverse_shift. Each row's bit segment is contiguous
+    in the unary integer, so we extract it, apply one reverse shift,
+    and reassemble.
+    """
+    total_bits = v.bit_length()
+
+    # Find row boundaries in bit-space
+    row_boundaries = [0]
+    pos = 0
+    tmp = v
+    for s in range(num_sites):
+        n_i = 0
+        t2 = tmp
+        while (t2 & 1) == 0 and t2 != 0:
+            n_i += 1
+            t2 >>= 1
+        pos += n_i + 1
+        tmp >>= (n_i + 1)
+        if (s + 1) % L == 0:
+            row_boundaries.append(pos)
+
+    # Apply reverse shift to each row's bit segment
+    result = 0
+    result_pos = 0
+    for y in range(L):
+        bit_start = row_boundaries[y]
+        bit_end = row_boundaries[y + 1]
+        row_bits_len = bit_end - bit_start
+        row_v = (v >> bit_start) & ((1 << row_bits_len) - 1)
+        row_v_shifted = _reverse_shift(row_v, row_bits_len)
+        result |= (row_v_shifted << result_pos)
+        result_pos += row_bits_len
+
+    return result
 
 
 # =====================================================================
@@ -178,6 +259,100 @@ if HAS_NUMBA:
             v |= (np.int64(1) << bp)
             bp += np.int64(1)
         return v
+
+    # --- Bitwise translation kernels (no decode/encode) ---
+
+    @njit(cache=True)
+    def _ctz_numba(v):
+        """Count trailing zeros of int64 (= occupation of first site)."""
+        if v == np.int64(0):
+            return np.int64(64)
+        n = np.int64(0)
+        while (v & np.int64(1)) == np.int64(0):
+            n += np.int64(1)
+            v >>= np.int64(1)
+        return n
+
+    @njit(cache=True)
+    def _reverse_shift_numba(v, total_bits):
+        """Cyclic right shift on unary integer (last site → front).
+
+        |n_0, ..., n_{L-1}⟩ → |n_{L-1}, n_0, ..., n_{L-2}⟩
+
+        Moves the MSB site-segment to the LSB position.
+        Pure integer ops, no decode/encode.
+        """
+        # Strip MSB wall bit
+        v_stripped = v ^ (np.int64(1) << (total_bits - np.int64(1)))
+
+        # Count leading zeros from MSB = occupation of last site
+        n_last = np.int64(0)
+        for bit_pos in range(total_bits - np.int64(2), np.int64(-1),
+                             np.int64(-1)):
+            if v_stripped & (np.int64(1) << bit_pos):
+                break
+            n_last += np.int64(1)
+
+        # Lower bits encode sites 0..L-2
+        remaining_bits = total_bits - np.int64(1) - n_last
+        remaining = v_stripped & ((np.int64(1) << remaining_bits)
+                                  - np.int64(1))
+
+        # Reassemble: remaining shifted up, new site at LSB
+        result = remaining << (n_last + np.int64(1))
+        result |= (np.int64(1) << n_last)
+        return result
+
+    @njit(cache=True)
+    def _translate_y_bitwise(v, L, total_bits):
+        """Apply Ty as L reverse shifts (no decode/encode).
+
+        Moves the last L site-segments (= last row) to the front.
+        """
+        for _ in range(L):
+            v = _reverse_shift_numba(v, total_bits)
+        return v
+
+    @njit(cache=True)
+    def _translate_x_bitwise(v, L, num_sites, total_bits):
+        """Apply Tx as per-row reverse shift (no decode/encode).
+
+        Each row's L site-segments are contiguous in the unary
+        integer. Extract each row's bit substring, apply one
+        reverse shift, and reassemble.
+        """
+        # Find row bit-boundaries by scanning the unary integer
+        # Row y ends after site (y+1)*L - 1
+        row_starts = np.empty(L + np.int64(1), dtype=np.int64)
+        row_starts[0] = np.int64(0)
+        pos = np.int64(0)
+        tmp = v
+        for s in range(num_sites):
+            n_i = np.int64(0)
+            while (tmp & np.int64(1)) == np.int64(0) and tmp != np.int64(0):
+                n_i += np.int64(1)
+                tmp >>= np.int64(1)
+            pos += n_i + np.int64(1)
+            tmp >>= np.int64(1)
+            if (s + np.int64(1)) % L == np.int64(0):
+                row_starts[(s + np.int64(1)) // L] = pos
+
+        # Apply reverse shift to each row independently
+        result = np.int64(0)
+        result_pos = np.int64(0)
+        for y in range(L):
+            bit_start = row_starts[y]
+            bit_end = row_starts[y + np.int64(1)]
+            row_len = bit_end - bit_start
+            row_v = (v >> bit_start) & ((np.int64(1) << row_len)
+                                        - np.int64(1))
+            row_shifted = _reverse_shift_numba(row_v, row_len)
+            result |= (row_shifted << result_pos)
+            result_pos += row_len
+
+        return result
+
+    # --- Legacy occupation-array translation (kept for Hamiltonian) ---
 
     @njit(cache=True)
     def _translate_x_numba(occ, new_occ, L, num_sites):
@@ -212,9 +387,12 @@ if HAS_NUMBA:
 
     @njit(cache=True)
     def _find_orbits_2d_numba(integers, L, num_sites):
-        """Numba-compiled 2D orbit enumeration.
+        """Numba-compiled 2D orbit enumeration using bitwise translations.
 
         Groups all basis states into orbits under {Tx^a · Ty^b}.
+        Uses direct bitwise operations on the unary integer — no
+        decode→permute→encode overhead.
+
         For each state, records:
           - orbit_id: which orbit it belongs to
           - (tx, ty): translation from representative to this state
@@ -237,9 +415,16 @@ if HAS_NUMBA:
         orbit_sizes = np.empty(D, dtype=np.int64)
         num_orbits = np.int64(0)
 
-        occ = np.empty(num_sites, dtype=np.int64)
-        shifted_occ = np.empty(num_sites, dtype=np.int64)
-        tmp_occ = np.empty(num_sites, dtype=np.int64)
+        # Compute total_bits once (same for all states: N + L²)
+        # N = number of particles = number of 0-bits in unary encoding
+        # total_bits = bit_length of any basis integer
+        total_bits = np.int64(0)
+        if D > np.int64(0):
+            # All states have the same total_bits (N + L²)
+            v0 = integers[0]
+            while v0 > np.int64(0):
+                total_bits += np.int64(1)
+                v0 >>= np.int64(1)
 
         for i in range(D):
             if state_to_orbit[i] >= np.int64(0):
@@ -249,23 +434,17 @@ if HAS_NUMBA:
             orbit_leaders[num_orbits] = i
             member_count = np.int64(0)
 
-            # Decode the representative state
-            _unary_to_occ_2d(integers[i], num_sites, occ)
+            v_rep = integers[i]
 
-            # Apply all L^2 translations: Tx^a · Ty^b
-            # Start with occ (ty=0), then apply Ty repeatedly
-            for s2 in range(num_sites):
-                shifted_occ[s2] = occ[s2]
-
+            # Apply all L² translations: Tx^tx · Ty^ty |rep⟩
+            # Outer loop: Ty^ty for ty = 0..L-1
+            v_ty = v_rep
             for ty in range(L):
-                # Now apply Tx^a for a = 0..L-1
-                for s2 in range(num_sites):
-                    tmp_occ[s2] = shifted_occ[s2]
-
+                # Inner loop: Tx^tx for tx = 0..L-1
+                v_tx_ty = v_ty
                 for tx in range(L):
-                    # tmp_occ is now Tx^tx · Ty^ty |r>
-                    v_translated = _occ_to_unary_2d(tmp_occ, num_sites)
-                    idx = _binary_search_2d(integers, v_translated)
+                    # v_tx_ty = Tx^tx · Ty^ty |rep⟩
+                    idx = _binary_search_2d(integers, v_tx_ty)
 
                     if idx >= np.int64(0) and state_to_orbit[idx] < np.int64(0):
                         state_to_orbit[idx] = orbit_id
@@ -273,17 +452,12 @@ if HAS_NUMBA:
                         state_to_ty[idx] = ty
                         member_count += np.int64(1)
 
-                    # Apply one more Tx (for next iteration)
-                    # tmp_occ -> Tx(tmp_occ)
-                    _translate_x_numba(tmp_occ, occ, L, num_sites)
-                    # Copy result back to tmp_occ (reuse occ as temp)
-                    for s2 in range(num_sites):
-                        tmp_occ[s2] = occ[s2]
+                    # Apply one more Tx (bitwise, no decode)
+                    v_tx_ty = _translate_x_bitwise(
+                        v_tx_ty, L, num_sites, total_bits)
 
-                # Apply one more Ty to shifted_occ for next ty
-                _translate_y_numba(shifted_occ, occ, L, num_sites)
-                for s2 in range(num_sites):
-                    shifted_occ[s2] = occ[s2]
+                # Apply one more Ty (bitwise, no decode)
+                v_ty = _translate_y_bitwise(v_ty, L, total_bits)
 
             orbit_sizes[num_orbits] = member_count
             num_orbits += np.int64(1)
@@ -505,17 +679,14 @@ def find_orbits_2d(basis: UnaryBasis, L: int):
         orbit_leaders_list.append(i)
         member_count = 0
 
-        # Get the representative occupation
-        rep_occ = basis.get_state(i)
+        v_rep = basis._integers[i]
 
-        # Apply all L² translations: Tx^tx · Ty^ty
-        shifted_occ = rep_occ
+        # Apply all L² translations using bitwise ops (no decode)
+        v_ty = int(v_rep)
         for ty in range(L):
-            current_occ = shifted_occ
+            v_tx_ty = v_ty
             for tx in range(L):
-                # current_occ = Tx^tx · Ty^ty |rep>
-                v = occupation_to_unary(current_occ)
-                idx = basis.get_index_from_integer(v)
+                idx = basis.get_index_from_integer(v_tx_ty)
 
                 if idx >= 0 and state_to_orbit[idx] < 0:
                     state_to_orbit[idx] = orbit_id
@@ -523,11 +694,11 @@ def find_orbits_2d(basis: UnaryBasis, L: int):
                     state_to_ty[idx] = ty
                     member_count += 1
 
-                # Apply one more Tx
-                current_occ = translate_x_occ(current_occ, L)
+                # Apply one more Tx (bitwise)
+                v_tx_ty = translate_x_integer(v_tx_ty, L, num_sites)
 
-            # Apply one more Ty to the base (ty row)
-            shifted_occ = translate_y_occ(shifted_occ, L)
+            # Apply one more Ty (bitwise)
+            v_ty = translate_y_integer(v_ty, L, num_sites)
 
         orbit_sizes_list.append(member_count)
         num_orbits += 1
