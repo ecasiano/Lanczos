@@ -313,10 +313,108 @@ class BoseHubbardKagome:
         """Nearest-neighbor bonds (for hopping)."""
         return self.nn_bonds
 
-    def hamiltonian(self) -> sparse.csr_matrix:
-        """Build and return the full sparse Hamiltonian."""
+    def _v_terms(self):
+        """Pairwise-V (coupling, bond-list) pairs actually in use."""
+        v_terms = []
+        if self.nn_interaction != 0.0:
+            v_terms.append((self.nn_interaction, self._shells[0]))
+        if self.v2_interaction != 0.0:
+            v_terms.append((self.v2_interaction, self._shells[1]))
+        if self.v3_interaction != 0.0:
+            v_terms.append((self.v3_interaction, self._shells[2]))
+        return v_terms
+
+    def diagonal_vector(self, occ: np.ndarray) -> np.ndarray:
+        """Vectorized interaction diagonal for an occupation array (dim, nsites).
+
+        Diagonal energy of each basis state:
+            (U/2) Σ n(n-1) − μ Σ n + Σ_shells V·n_i n_j + W Σ_hex (n_hex)²
+        """
+        occ = occ.astype(np.float64)
+        dim = occ.shape[0]
+        diag = np.zeros(dim)
+        if self.interaction != 0.0:
+            diag += (self.interaction / 2.0) * (occ * (occ - 1.0)).sum(axis=1)
+        if self.chemical_potential != 0.0:
+            diag -= self.chemical_potential * occ.sum(axis=1)
+        for coupling, bonds in self._v_terms():
+            if bonds:
+                b = np.asarray(bonds)
+                diag += coupling * (occ[:, b[:, 0]] * occ[:, b[:, 1]]).sum(axis=1)
+        if self.cluster_charging != 0.0:
+            for hexa in self.hexagons():
+                nh = occ[:, list(hexa)].sum(axis=1)
+                diag += self.cluster_charging * nh * nh
+        return diag
+
+    def _can_use_fast(self) -> bool:
+        """Fast vectorized path: hardcore, canonical (UnaryBasis), nsites<=62."""
+        return (self.hardcore
+                and isinstance(self.basis, UnaryBasis)
+                and self.num_sites <= 62)
+
+    def _hamiltonian_fast(self) -> sparse.csr_matrix:
+        """Vectorized (numpy, no-numba) hardcore Hamiltonian build.
+
+        Each hardcore Fock state maps to a unique bitmask Σ_i n_i 2^i. Hopping
+        targets are computed by bit arithmetic and located with a single
+        vectorized np.searchsorted over the sorted bitmasks — replacing the
+        per-state Python loop. Produces the SAME matrix (same basis ordering)
+        as the reference builder.
+        """
+        basis = self.basis
+        dim = basis.dim
+        nsite = self.num_sites
+
+        occ = basis.all_states_as_array().astype(np.int64)  # (dim, nsite)
+        powers = (np.int64(1) << np.arange(nsite, dtype=np.int64))
+        bitmask = occ @ powers                              # unique per state
+        order = np.argsort(bitmask, kind='stable')
+        sorted_bm = bitmask[order]
+
+        rows, cols, vals = [], [], []
+        for (i, j) in self.nn_bonds:
+            # single direction: move a particle j -> i (j occupied, i empty);
+            # the reverse hop is added by the transpose below.
+            src = np.nonzero((occ[:, j] == 1) & (occ[:, i] == 0))[0]
+            if src.size == 0:
+                continue
+            tbm = bitmask[src] - (np.int64(1) << np.int64(j)) \
+                               + (np.int64(1) << np.int64(i))
+            p = np.searchsorted(sorted_bm, tbm)
+            tgt = order[p]
+            # every target lives in the same particle-number sector, so it
+            # must be present; assert to catch any lookup error.
+            assert np.all(sorted_bm[p] == tbm), "hop target missing from basis"
+            rows.append(tgt); cols.append(src)
+            vals.append(np.full(src.size, -self.hopping))
+
+        if rows:
+            rows = np.concatenate(rows); cols = np.concatenate(cols)
+            vals = np.concatenate(vals)
+        else:
+            rows = np.empty(0, int); cols = np.empty(0, int); vals = np.empty(0)
+
+        H_off = sparse.csr_matrix((vals, (rows, cols)), shape=(dim, dim),
+                                  dtype=np.float64)
+        H_off = H_off + H_off.T                     # add the reverse hops
+        H = (H_off + sparse.diags(self.diagonal_vector(occ))).tocsr()
+        H.eliminate_zeros()
+        self._hamiltonian_matrix = H
+        return H
+
+    def hamiltonian(self, force_reference: bool = False) -> sparse.csr_matrix:
+        """Build and return the full sparse Hamiltonian.
+
+        Uses the vectorized fast path for hardcore/canonical systems; set
+        ``force_reference=True`` to force the plain-Python reference builder
+        (used to validate the fast path).
+        """
         if self._hamiltonian_matrix is not None:
             return self._hamiltonian_matrix
+
+        if self._can_use_fast() and not force_reference:
+            return self._hamiltonian_fast()
 
         basis = self.basis
         hilbert_dim = basis.dim

@@ -141,6 +141,23 @@ for (L, N) in [(2, 4), (2, 6), (3, 3), (3, 6)]:
     check(f"L={L} N={N}: cluster - 2*pairwise_in_hex = 2N = {2*N}",
           np.allclose(diff, diff[0]) and abs(diff[0] - 2*N) < 1e-9)
 
+print("\nTest 7: vectorized fast builder == reference builder (exact matrix)")
+for (L, N, V1, V2, V3, W, mu) in [
+        (2, 4, 1.5, 0.0, 0.0, 0.0, 0.0),
+        (2, 4, 1.0, 0.7, 0.4, 0.0, 0.3),
+        (2, 4, 0.0, 0.0, 0.0, 2.0, 0.0),
+        (3, 3, 1.0, 0.5, 0.0, 0.0, 0.0),
+        (3, 4, 0.0, 0.0, 0.0, 1.5, 0.2)]:
+    m = BoseHubbardKagome(linear_size=L, hopping=1.0, total_particles=N,
+                          hardcore=True, nn_interaction=V1, v2_interaction=V2,
+                          v3_interaction=V3, cluster_charging=W,
+                          chemical_potential=mu)
+    Hf = m.hamiltonian()                       # vectorized fast path
+    m._hamiltonian_matrix = None
+    Hr = m.hamiltonian(force_reference=True)   # plain-Python reference
+    check(f"L={L} N={N} V=({V1},{V2},{V3}) W={W}: fast == reference",
+          abs(Hf - Hr).max() < 1e-12)
+
 total = PASS + FAIL
 print(f"\n{'='*60}")
 print(f"Results: {PASS} passed, {FAIL} failed out of {total} tests")
