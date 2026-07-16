@@ -175,7 +175,8 @@ if HAS_NUMBA:
     @njit(cache=True)
     def _build_reduced_H_numba(integers, L, n_max, cycle_leaders,
                                 cycle_sizes, num_cycles, state_to_cycle,
-                                hopping, interaction, chem_pot, bonds):
+                                hopping, interaction, chem_pot, bonds,
+                                nn_interaction):
         """Numba-compiled symmetry-reduced Hamiltonian construction.
 
         Returns COO triple arrays (rows, cols, vals) for the upper triangle.
@@ -203,6 +204,10 @@ if HAS_NUMBA:
                 n_i = occ[s]
                 diag += (interaction / 2.0) * n_i * (n_i - 1)
                 diag -= chem_pot * n_i
+
+            if nn_interaction != 0.0:
+                for b in range(num_bonds):
+                    diag += nn_interaction * occ[bonds[b, 0]] * occ[bonds[b, 1]]
 
             if diag != 0.0:
                 rows[nnz] = c
@@ -476,6 +481,7 @@ def build_reduced_hamiltonian(
     interaction: float,
     chemical_potential: float,
     neighbor_pairs: list,
+    nn_interaction: float = 0.0,
 ) -> sparse.csr_matrix:
     """Build the Hamiltonian in the q=0, R=+1 symmetry-reduced basis.
 
@@ -534,7 +540,7 @@ def build_reduced_hamiltonian(
             integers, L, n_max_numba, cycle_leaders, cycle_sizes,
             num_cycles, state_to_cycle,
             float(hopping), float(interaction), float(chemical_potential),
-            bonds,
+            bonds, float(nn_interaction),
         )
 
         H_upper = sparse.csr_matrix(
@@ -570,6 +576,12 @@ def build_reduced_hamiltonian(
             n_i = occupation[site]
             diagonal_energy += (interaction / 2.0) * n_i * (n_i - 1)
             diagonal_energy -= chemical_potential * n_i
+
+        if nn_interaction != 0.0:
+            for site_i, site_j in neighbor_pairs:
+                diagonal_energy += (
+                    nn_interaction * occupation[site_i] * occupation[site_j]
+                )
 
         if diagonal_energy != 0.0:
             rows.append(cycle_id)

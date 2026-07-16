@@ -70,6 +70,17 @@ def parse_args(argv=None):
         help="Max occupation per site. Default: N for canonical, "
              "required for grand canonical",
     )
+    parser.add_argument(
+        "--hardcore", action="store_true",
+        help="Hardcore bosons (n_max=1 forced; U term is then trivially "
+             "zero, so interaction physics lives in --V)",
+    )
+    parser.add_argument(
+        "--V", type=float, default=0.0,
+        help="Nearest-neighbor (extended) interaction strength V "
+             "(Extended Bose-Hubbard Model): V * sum_<i,j> n_i n_j. "
+             "Default: 0.0 (standard Bose-Hubbard)",
+    )
 
     # Ensemble
     parser.add_argument(
@@ -145,7 +156,11 @@ def main(argv=None):
     print(f"  Sites (L):            {args.L}")
     print(f"  Hopping (t):          {args.t}")
     print(f"  Interaction (U):      {args.U}")
+    if args.V != 0.0:
+        print(f"  NN interaction (V):   {args.V}")
     print(f"  Chemical pot. (mu):   {args.mu}")
+    if args.hardcore:
+        print(f"  Hardcore bosons:      True (n_max=1)")
     nmax_display = args.n_max if args.n_max else f"unrestricted (= N = {args.N})"
     print(f"  Max occupation:       {nmax_display}")
     if args.grand_canonical:
@@ -166,6 +181,8 @@ def main(argv=None):
         max_occupation=args.n_max,
         total_particles=total_particles,
         boundary=args.boundary,
+        hardcore=args.hardcore,
+        nn_interaction=args.V,
     )
     print(f"Hilbert space dimension: {model.dim}")
 

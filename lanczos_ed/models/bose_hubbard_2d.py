@@ -155,7 +155,24 @@ class BoseHubbard2D:
                  max_occupation: Optional[int] = None,
                  total_particles: Optional[int] = None,
                  boundary: str = 'pbc',
-                 use_symmetry: bool = False):
+                 use_symmetry: bool = False,
+                 hardcore: bool = False,
+                 nn_interaction: float = 0.0):
+
+        self.hardcore = hardcore
+        self.nn_interaction = nn_interaction
+
+        if hardcore:
+            # Hardcore bosons: at most one particle per site (n_i in {0,1}).
+            # Forces max_occupation=1; the on-site U term is then always
+            # zero (n_i(n_i-1)=0), so interaction physics lives in
+            # nn_interaction (V), the extended (nearest-neighbor) term.
+            if max_occupation is not None and max_occupation != 1:
+                raise ValueError(
+                    "hardcore=True requires max_occupation=1 "
+                    f"(got max_occupation={max_occupation})"
+                )
+            max_occupation = 1
 
         self.linear_size = linear_size
         self.num_sites = linear_size * linear_size
@@ -297,12 +314,19 @@ class BoseHubbard2D:
 
             # =============================================================
             # Diagonal: (U/2) sum_i n_i(n_i - 1) - mu sum_i n_i
+            #           + V sum_{<i,j>} n_i n_j
             # =============================================================
             diagonal_energy = 0.0
             for site in range(self.num_sites):
                 n_i = occupation[site]
                 diagonal_energy += (self.interaction / 2.0) * n_i * (n_i - 1)
                 diagonal_energy -= self.chemical_potential * n_i
+
+            if self.nn_interaction != 0.0:
+                for site_i, site_j in neighbor_pairs:
+                    diagonal_energy += (
+                        self.nn_interaction * occupation[site_i] * occupation[site_j]
+                    )
 
             if diagonal_energy != 0.0:
                 row_indices.append(state_index)
@@ -396,6 +420,7 @@ class BoseHubbard2D:
             interaction=self.interaction,
             chemical_potential=self.chemical_potential,
             neighbor_pairs=self._get_neighbor_pairs(),
+            nn_interaction=self.nn_interaction,
             kx=0.0,
             ky=0.0,
         )
@@ -474,11 +499,14 @@ class BoseHubbard2D:
                 f"reduced_dim={self.dim}, full_dim={self.full_dim}"
             )
 
+        hc_info = ", hardcore=True" if self.hardcore else ""
+        v_info = f", V={self.nn_interaction}" if self.nn_interaction != 0.0 else ""
+
         return (
             f"BoseHubbard2D({L}x{L}, "
-            f"t={self.hopping}, U={self.interaction}, "
+            f"t={self.hopping}, U={self.interaction}{v_info}, "
             f"mu={self.chemical_potential}, "
-            f"max_occupation={self.max_occupation}, "
+            f"max_occupation={self.max_occupation}{hc_info}, "
             f"{ensemble_info}, boundary='{self.boundary}', "
             f"basis={type(self.basis).__name__}"
             f"{sym_info if self.use_symmetry else f', dim={self.dim}'}"

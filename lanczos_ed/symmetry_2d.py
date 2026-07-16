@@ -470,7 +470,7 @@ if HAS_NUMBA:
                                    orbit_leaders, orbit_sizes, num_orbits,
                                    state_to_orbit, state_to_tx, state_to_ty,
                                    hopping, interaction, chem_pot, bonds,
-                                   kx, ky):
+                                   kx, ky, nn_interaction):
         """Numba-compiled 2D symmetry-reduced Hamiltonian construction.
 
         For (kx, ky) = (0, 0), all phases are 1.0 and the result is
@@ -501,12 +501,16 @@ if HAS_NUMBA:
             _unary_to_occ_2d(integers[leader_idx], num_sites, occ)
             bra_size = np.float64(orbit_sizes[c])
 
-            # --- Diagonal: (U/2) sum n_i(n_i-1) - mu sum n_i ---
+            # --- Diagonal: (U/2) sum n_i(n_i-1) - mu sum n_i + V sum n_i n_j ---
             diag = 0.0
             for s in range(num_sites):
                 n_i = occ[s]
                 diag += (interaction / 2.0) * n_i * (n_i - 1)
                 diag -= chem_pot * n_i
+
+            if nn_interaction != 0.0:
+                for b in range(num_bonds):
+                    diag += nn_interaction * occ[bonds[b, 0]] * occ[bonds[b, 1]]
 
             if diag != 0.0:
                 rows[nnz] = c
@@ -736,6 +740,7 @@ def build_reduced_hamiltonian_2d(
     neighbor_pairs: list,
     kx: float = 0.0,
     ky: float = 0.0,
+    nn_interaction: float = 0.0,
 ) -> sparse.csr_matrix:
     """Build the Hamiltonian in a 2D momentum sector.
 
@@ -789,7 +794,7 @@ def build_reduced_hamiltonian_2d(
             orbit_leaders, orbit_sizes, np.int64(num_orbits),
             state_to_orbit, state_to_tx, state_to_ty,
             float(hopping), float(interaction), float(chemical_potential),
-            bonds, float(kx), float(ky),
+            bonds, float(kx), float(ky), float(nn_interaction),
         )
 
         if is_zero_momentum:
@@ -830,6 +835,12 @@ def build_reduced_hamiltonian_2d(
             n_i = occupation[site]
             diagonal_energy += (interaction / 2.0) * n_i * (n_i - 1)
             diagonal_energy -= chemical_potential * n_i
+
+        if nn_interaction != 0.0:
+            for site_i, site_j in neighbor_pairs:
+                diagonal_energy += (
+                    nn_interaction * occupation[site_i] * occupation[site_j]
+                )
 
         if diagonal_energy != 0.0:
             rows.append(orbit_id)
