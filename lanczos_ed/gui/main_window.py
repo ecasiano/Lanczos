@@ -33,6 +33,7 @@ from ..solvers.lanczos import LanczosSolver
 from ..observables.basic import (
     density_profile, bipartite_fluctuations, entanglement_entropy,
     accessible_entanglement_entropy, sweep_observables,
+    particle_partition_entropy,
 )
 
 # Optional: matplotlib for plotting density profiles
@@ -188,6 +189,18 @@ class SolverWorker(QThread):
                 make_subsystem, l_max,
             )
             t_sweep = time.time() - t_sweep_start
+
+            # --- Particle-partitioned entanglement entropy ---
+            # Compute S₂(n_A) for all n_A = 1..N-1
+            t_ppee_start = time.time()
+            N_particles = getattr(basis_for_obs, 'total_particles', None)
+            ppee_data = {}
+            if N_particles is not None and N_particles > 1:
+                for n_A in range(1, N_particles):
+                    ppee_data[n_A] = particle_partition_entropy(
+                        ground_state_wfn, basis_for_obs, n_A,
+                    )
+            t_ppee = time.time() - t_ppee_start
             t_end = time.time()
 
             # For backward compatibility, use l_max as the "primary" cut
@@ -205,6 +218,7 @@ class SolverWorker(QThread):
                 'von_neumann_entropy': primary.get('S_1', 0.0),
                 'renyi_2_entropy': primary.get('S_2', 0.0),
                 'accessible_entropy': primary.get('S_2_acc', 0.0),
+                'ppee': ppee_data,
                 'use_symmetry': model.use_symmetry,
                 'solver': solver_type,
                 'sweep_data': sweep_data,
@@ -215,6 +229,7 @@ class SolverWorker(QThread):
                 'time_solve': t_solve - t_basis,
                 'time_density': t_density,
                 'time_sweep': t_sweep,
+                'time_ppee': t_ppee,
             }
 
             if model_type in ('2D', '3D'):
@@ -418,6 +433,15 @@ class SweepWorker(QThread):
                     make_subsystem, l_max,
                 )
 
+                # Particle-partitioned entanglement entropy
+                N_particles = getattr(basis_for_obs, 'total_particles', None)
+                ppee_data = {}
+                if N_particles is not None and N_particles > 1:
+                    for n_A_pp in range(1, N_particles):
+                        ppee_data[n_A_pp] = particle_partition_entropy(
+                            ground_state_wfn, basis_for_obs, n_A_pp,
+                        )
+
                 t_total = time.time() - t_start
 
                 # Collect result for this grid point
@@ -428,6 +452,7 @@ class SweepWorker(QThread):
                     'ground_state_energy': eigenvalues[0],
                     'density': obs_density,
                     'sweep_data': sweep_data,
+                    'ppee': ppee_data,
                     'time_total': t_total,
                 }
                 all_results.append(point_result)
@@ -486,16 +511,24 @@ class SweepWorker(QThread):
                 lines.append(f"# {extra_header}")
             lines.append("#")
 
+            # Determine PPEE column headers from first result
+            ppee_keys = sorted(results[0].get('ppee', {}).keys()) \
+                if results else []
+
             # Fixed-width column header
             #   model  L   t       U/t         mu/t
             #   nmax   N   BC  solver  dim
-            #   E0     l   |A|  F_A  S1  S2  S2acc  time
+            #   E0     l   |A|  F_A  S1  S2  S2acc  S2(n=1)...  time
+            ppee_hdr = "".join(
+                f"  {'S2(n=' + str(k) + ')':>14s}" for k in ppee_keys
+            )
             hdr = (
                 f"# {'model':>5s}  {'L':>4s}  {'t':>10s}  {'U/t':>12s}  "
                 f"{'mu/t':>12s}  {'nmax':>5s}  {'N':>5s}  {'BC':>4s}  "
                 f"{'solver':>10s}  {'dim':>10s}  {'E_0':>16s}  "
                 f"{'l':>4s}  {'|A|':>5s}  {'F_A':>14s}  {'S_1':>14s}  "
-                f"{'S_2':>14s}  {'S_2_acc':>14s}  {'time_s':>8s}"
+                f"{'S_2':>14s}  {'S_2_acc':>14s}"
+                f"{ppee_hdr}  {'time_s':>8s}"
             )
             lines.append(hdr)
             lines.append("#" + "-" * (len(hdr) - 1))
@@ -523,6 +556,11 @@ class SweepWorker(QThread):
                 E0 = r['ground_state_energy']
                 t_s = r['time_total']
 
+                ppee = r.get('ppee', {})
+                ppee_cols = "".join(
+                    f"  {ppee.get(k, 0.0):14.10f}" for k in ppee_keys
+                )
+
                 sweep = r.get('sweep_data', [])
                 if sweep:
                     for entry in sweep:
@@ -535,10 +573,14 @@ class SweepWorker(QThread):
                             f"{entry['F_A']:14.10f}  "
                             f"{entry['S_1']:14.10f}  "
                             f"{entry['S_2']:14.10f}  "
-                            f"{entry['S_2_acc']:14.10f}  "
+                            f"{entry['S_2_acc']:14.10f}"
+                            f"{ppee_cols}  "
                             f"{t_s:8.3f}"
                         )
                 else:
+                    ppee_zeros = "".join(
+                        f"  {'0.0':>14s}" for _ in ppee_keys
+                    )
                     lines.append(
                         f"  {model_type:>5s}  {L_disp:4d}  "
                         f"{t_hop:10.6f}  {U:12.6f}  {mu:12.6f}  "
@@ -546,7 +588,8 @@ class SweepWorker(QThread):
                         f"{dim:10d}  {E0:16.10f}  "
                         f"{'0':>4s}  {'0':>5s}  "
                         f"{'0.0':>14s}  {'0.0':>14s}  "
-                        f"{'0.0':>14s}  {'0.0':>14s}  "
+                        f"{'0.0':>14s}  {'0.0':>14s}"
+                        f"{ppee_zeros}  "
                         f"{t_s:8.3f}"
                     )
             return lines
@@ -1460,6 +1503,10 @@ class MainWindow(QMainWindow):
             timing_parts.append(
                 f"observables {result['time_sweep']:.3f}s"
             )
+        if 'time_ppee' in result:
+            timing_parts.append(
+                f"PPEE {result['time_ppee']:.3f}s"
+            )
         if timing_parts:
             lines.append(f"  Breakdown: {' | '.join(timing_parts)}")
 
@@ -1592,6 +1639,19 @@ class MainWindow(QMainWindow):
                     lines.append(
                         f"    {n:5d}  {p_n:14.10f}  {s2_n:14.10f}"
                     )
+
+        # Particle-partitioned entanglement entropy
+        ppee_data = result.get('ppee', {})
+        if ppee_data:
+            lines.append("")
+            lines.append("Particle-partitioned entanglement entropy "
+                         "S₂(n_A):")
+            lines.append(f"  {'n_A':>5s}  {'S_2(n_A)':>14s}")
+            lines.append("  " + "-" * 23)
+            for n_A in sorted(ppee_data.keys()):
+                lines.append(
+                    f"  {n_A:5d}  {ppee_data[n_A]:14.10f}"
+                )
 
         self.text_results.setText("\n".join(lines))
 

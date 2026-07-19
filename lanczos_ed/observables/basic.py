@@ -646,6 +646,150 @@ def accessible_entanglement_entropy(wavefunction: np.ndarray, basis,
 
 
 # =====================================================================
+# Particle-Partitioned Entanglement Entropy (PPEE)
+# =====================================================================
+
+def particle_partition_entropy(wavefunction: np.ndarray, basis,
+                                n_A: int,
+                                renyi_index: float = 2.0) -> float:
+    """Compute the particle-partitioned Rényi entanglement entropy.
+
+    Splits N identical bosons into a group of n_A and a group of
+    N - n_A particles.  The n_A-body reduced density matrix is:
+
+        rho_A(m1, m2) = (1/C(N,n_A)) sum_{m_B}
+            c(m1+m_B) * c*(m2+m_B)
+            * sqrt( prod_i C(m1_i+m_B_i, m1_i) )
+            * sqrt( prod_i C(m2_i+m_B_i, m2_i) )
+
+    where the sum runs over all occupation vectors m_B with
+    |m_B| = N - n_A, and c(n) is the ground-state amplitude
+    for Fock state |n>.  The combinatorial weights come from
+    decomposing the symmetrized N-boson Fock state into
+    (n_A, N-n_A) particle partitions.
+
+    Then S_alpha(n_A) is the Rényi-alpha entropy of rho_A.
+
+    Reference:
+        Herdman, Tulin, Gingras & Del Maestro, PRB 94, 064524 (2016)
+
+    Parameters
+    ----------
+    wavefunction : ndarray, shape (dim,)
+        Many-body ground state in the Fock basis.
+    basis : FockBasis or UnaryBasis
+        Fock basis (canonical, fixed N).
+    n_A : int
+        Number of particles in partition A (1 <= n_A <= N-1).
+    renyi_index : float
+        Rényi index alpha (default 2.0).
+
+    Returns
+    -------
+    S_alpha_n : float
+        Rényi-alpha particle-partition entanglement entropy.
+    """
+    from math import comb as _comb
+
+    num_sites = basis.num_sites
+    total_particles = getattr(basis, 'total_particles', None)
+    if total_particles is None:
+        raise ValueError(
+            "particle_partition_entropy requires a canonical basis "
+            "(fixed particle number N)."
+        )
+    N = total_particles
+    n_B = N - n_A
+
+    if n_A < 1 or n_A >= N:
+        raise ValueError(
+            f"n_A must satisfy 1 <= n_A <= N-1, got n_A={n_A}, N={N}"
+        )
+
+    max_occ = getattr(basis, 'max_occupation', None)
+    if max_occ is None:
+        max_occ = N  # effective cap
+
+    # --- Generate occupation vectors for n_A and n_B particles ---
+    def _gen_occ(nsites, npart, nmax):
+        """Enumerate all occupation vectors with sum = npart, each <= nmax."""
+        if nsites == 1:
+            if npart <= nmax:
+                yield (npart,)
+            return
+        for n in range(min(npart, nmax), -1, -1):
+            for rest in _gen_occ(nsites - 1, npart - n, nmax):
+                yield (n,) + rest
+
+    states_A = list(_gen_occ(num_sites, n_A, max_occ))
+    states_B = list(_gen_occ(num_sites, n_B, max_occ))
+    dim_A = len(states_A)
+
+    C_N_nA = _comb(N, n_A)
+
+    # --- Build the n_A-body RDM ---
+    #
+    # For each B-partition occupation m_B, compute the vector of
+    # weighted amplitudes across all A-partition states, then
+    # accumulate the outer product into rho_A.  This is equivalent
+    # to  rho_A = M @ M^T  where M has columns indexed by m_B.
+    #
+    # Memory: O(dim_A^2) for rho_A, O(dim_A) per m_B column.
+
+    rho_A = np.zeros((dim_A, dim_A))
+
+    for m_B in states_B:
+        coeffs = np.zeros(dim_A)
+
+        for a_idx, m_A in enumerate(states_A):
+            # Combined occupation n = m_A + m_B
+            n_full = tuple(m_A[i] + m_B[i] for i in range(num_sites))
+
+            # Check max-occupation constraint
+            if any(ni > max_occ for ni in n_full):
+                continue
+
+            # Look up in the full N-particle basis
+            full_idx = basis.get_index(n_full)
+            if full_idx < 0:
+                continue
+
+            # Combinatorial weight: sqrt( prod_i C(n_i, m_A_i) / C(N, n_A) )
+            #
+            # This arises from decomposing the bosonic Fock state
+            # |n> into (n_A, n_B) particle partitions:
+            #   |n> = sum_{m+m'=n} sqrt(prod C(n_i,m_i) / C(N,n_A))
+            #         |m>_A |m'>_B
+            weight = 1.0
+            for i in range(num_sites):
+                weight *= _comb(n_full[i], m_A[i])
+            weight = np.sqrt(weight / C_N_nA)
+
+            coeffs[a_idx] = wavefunction[full_idx] * weight
+
+        # rho_A += |coeffs><coeffs|
+        rho_A += np.outer(coeffs, coeffs)
+
+    # --- Compute Rényi entropy ---
+    alpha = renyi_index
+
+    if abs(alpha - 1.0) < 1e-10:
+        # Von Neumann: S_1 = -Tr(rho_A log rho_A)
+        eigenvalues = np.linalg.eigvalsh(rho_A)
+        eigenvalues = eigenvalues[eigenvalues > 1e-30]
+        return -np.sum(eigenvalues * np.log(eigenvalues))
+    elif abs(alpha - 2.0) < 1e-10:
+        # Rényi-2: S_2 = -log(Tr(rho_A^2))
+        tr_rho_sq = np.trace(rho_A @ rho_A)
+        return -np.log(tr_rho_sq) if tr_rho_sq > 1e-30 else 0.0
+    else:
+        # General Rényi-alpha: S_a = log(Tr(rho^a)) / (1 - a)
+        eigenvalues = np.linalg.eigvalsh(rho_A)
+        eigenvalues = eigenvalues[eigenvalues > 1e-30]
+        return np.log(np.sum(eigenvalues ** alpha)) / (1.0 - alpha)
+
+
+# =====================================================================
 # Schmidt spectrum: dispatch to Numba or Python
 # =====================================================================
 

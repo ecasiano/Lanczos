@@ -25,6 +25,7 @@ from .models.bose_hubbard import BoseHubbard1D
 from .solvers.lanczos import LanczosSolver
 from .observables.basic import (
     density_profile, bipartite_fluctuations, entanglement_entropy,
+    particle_partition_entropy,
 )
 
 
@@ -229,6 +230,16 @@ def main(argv=None):
             print(f"Von Neumann entropy S_1 (L/2 cut):    {entropy:.10f}")
         else:
             print(f"Rényi-{alpha} entropy S_{alpha} (L/2 cut):      {entropy:.10f}")
+
+    # Particle-partitioned entanglement entropy
+    N_particles = getattr(basis, 'total_particles', None)
+    if N_particles is not None and N_particles > 1:
+        print("\nParticle-partitioned entanglement entropy S₂(n_A):")
+        for n_A in range(1, N_particles):
+            s2_ppee = particle_partition_entropy(
+                ground_state_wfn, basis, n_A,
+            )
+            print(f"  n_A = {n_A}:  S_2 = {s2_ppee:.10f}")
 
     total_time = time.time() - time_start
     print(f"\nTotal time: {total_time:.3f}s")
