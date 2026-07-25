@@ -15,7 +15,7 @@ Grab the latest pre-built app from [**Releases**](https://github.com/ecasiano/La
 | **Windows** | `Lanczos.ED.Setup.exe` | Coming soon |
 | **Linux** | `Lanczos.ED.AppImage` | Coming soon |
 
-> **macOS Gatekeeper note:** If macOS says "app can't be opened because it is from an unidentified developer," right-click the app → **Open** → click **Open** again in the dialog.
+> **macOS Gatekeeper note:** macOS may block the app because it's from an unidentified developer. To allow it, go to **System Settings → Privacy & Security**, scroll down, and click **Open Anyway** next to the Lanczos ED entry.
 
 That's it. Open the app, pick your lattice, set your parameters, and run.
 
