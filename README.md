@@ -1,64 +1,58 @@
 # Lanczos ED
 
-A fast, simple desktop application for exact diagonalization of quantum lattice models. Double-click the app, pick your parameters, and go — no terminal required.
+A fast, simple desktop application for exact diagonalization of quantum lattice models. **Download, double-click, and go** — no terminal, no Python install, no dependencies.
 
 <!-- screenshot placeholder: replace with actual screenshot -->
 <!-- ![Lanczos ED screenshot](docs/screenshot.png) -->
 
-## Download
+## Get the app
 
-Pre-built apps are available on the [Releases](https://github.com/ecasiano/Lanczos/releases) page:
+Download the latest release for your platform from [**Releases**](https://github.com/ecasiano/Lanczos/releases):
 
-| Platform | Download |
-|----------|----------|
-| macOS    | `Lanczos.ED.dmg` |
-| Windows  | `Lanczos.ED.Setup.exe` (coming soon) |
-| Linux    | `Lanczos.ED.AppImage` (coming soon) |
+| Platform | File | Status |
+|----------|------|--------|
+| **macOS** | `Lanczos.ED.dmg` | Available |
+| **Windows** | `Lanczos.ED.Setup.exe` | Coming soon |
+| **Linux** | `Lanczos.ED.AppImage` | Coming soon |
 
-On macOS, if you see "app can't be opened because it is from an unidentified developer," right-click the app and choose **Open**.
+> **macOS Gatekeeper note:** If macOS says "app can't be opened because it is from an unidentified developer," right-click the app → **Open** → click **Open** again in the dialog.
 
-## What it does
+That's it. Open the app, pick your lattice, set your parameters, and run.
 
-Lanczos ED solves quantum lattice Hamiltonians by exact diagonalization using the Lanczos algorithm. It targets small-to-moderate system sizes where the full many-body Hilbert space is tractable, and computes ground-state energies, entanglement entropies, density profiles, and topological invariants.
+## What it computes
 
-### Supported models
+Lanczos ED solves quantum lattice Hamiltonians via the Lanczos algorithm at small-to-moderate system sizes where the full many-body Hilbert space fits in memory.
 
-- **Bose-Hubbard** — 1D chains, 2D square lattices, 3D cubic lattices, and the kagome lattice. Periodic or open boundary conditions, canonical or grand-canonical ensemble, tunable occupation cutoff.
-- **Fractional Chern insulator** — Kagome lattice with complex nearest-neighbor hopping (Chern band C = 1) and band-projected interactions at fractional filling ν = 1/3. Includes momentum-resolved spectrum and real-space transform for entanglement.
+**Models:** Bose-Hubbard on 1D chains, 2D square lattices, 3D cubic lattices, and the kagome lattice (periodic or open boundaries, canonical or grand-canonical, tunable occupation cutoff). Fractional Chern insulator on kagome with complex hopping (C = 1 band) and band-projected interactions at ν = 1/3.
 
-### Observables
+**Observables:** Ground-state energy, density profile ⟨nᵢ⟩, bipartite particle-number fluctuations, von Neumann and Rényi entanglement entropies (S₁, S₂) via sector SVD, accessible entanglement entropy S_acc, particle-partitioned entanglement entropy S₂(nₐ) with chunked BLAS acceleration, symmetry-resolved entanglement per charge sector, particle-number distributions p(nₐ), and topological entanglement entropy (Kitaev-Preskill).
 
-Ground-state energy, density profile ⟨nᵢ⟩, bipartite particle-number fluctuations, von Neumann and Rényi entanglement entropies (S₁, S₂) via sector-by-sector SVD, accessible entanglement entropy S_acc, particle-partitioned entanglement, symmetry-resolved entanglement S₂(nₐ) per charge sector, particle-number distributions p(nₐ), and topological entanglement entropy (Kitaev-Preskill).
+**Performance:** All critical kernels are JIT-compiled with [Numba](https://numba.pydata.org). The matrix-free Lanczos solver computes H|ψ⟩ on-the-fly with parallel threads, avoiding the cost of storing the full sparse matrix. Translational symmetry (with optional reflection) reduces the Hilbert space by a factor of L in 1D and L² in 2D.
 
-### Performance
+## For developers
 
-All performance-critical kernels (basis enumeration, Hamiltonian application, symmetry operations, observable computation) are JIT-compiled with [Numba](https://numba.pydata.org). The matrix-free Lanczos solver computes H|ψ⟩ on-the-fly with parallel threads, avoiding the memory cost of storing the full sparse matrix. Translational symmetry (with optional reflection) reduces the Hilbert space by a factor of L in 1D and L² in 2D.
-
-## Running from source
-
-If you prefer to run from source rather than the desktop app:
+<details>
+<summary>Running from source</summary>
 
 ```bash
 git clone https://github.com/ecasiano/Lanczos.git
 cd Lanczos
 pip install -r requirements.txt
-```
-
-Launch the GUI:
-
-```bash
 python -m lanczos_ed --gui
 ```
 
-### Command line
+Command line:
 
 ```bash
-python -m lanczos_ed --L 6 --N 3 --U 4.0
+python -m lanczos_ed --L 8 --N 4 --U 4.0
 python -m lanczos_ed --L 4 --n_max 2 --grand_canonical --mu 0.5
 python -m lanczos_ed --L 8 --N 4 --boundary obc --solver matrix_free
 ```
 
-### As a library
+</details>
+
+<details>
+<summary>As a Python library</summary>
 
 ```python
 from lanczos_ed.models.bose_hubbard import BoseHubbard1D
@@ -81,16 +75,18 @@ for r in results:
     print(f"l={r['l']}  S₂={r['S_2']:.6f}  S₂_acc={r['S_2_acc']:.6f}")
 ```
 
-## Building the desktop app
+</details>
 
-To build the `.app` bundle yourself (macOS):
+<details>
+<summary>Building the app yourself</summary>
 
 ```bash
-cd Lanczos
 pip install pyinstaller Pillow
 ./build_mac.sh
 open "dist/Lanczos ED.app"
 ```
+
+</details>
 
 ## Project structure
 

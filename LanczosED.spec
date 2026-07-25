@@ -3,35 +3,50 @@
 PyInstaller spec for Lanczos ED macOS app.
 
 Build with:
-    pyinstaller LanczosED.spec
-
-Or use the build script:
-    ./build_mac.sh
+    pyinstaller --noconfirm LanczosED.spec
 """
 import os
-import sys
 
 block_cipher = None
 
-# Find the icon file
 icon_path = os.path.join('icons', 'LanczosED.icns')
 if not os.path.exists(icon_path):
     icon_path = None
 
+# ---- collect numba/llvmlite without collect_all ----
+# collect_all produces entries with absolute dest paths that break
+# the macOS BUNDLE step.  Use targeted helpers instead.
+from PyInstaller.utils.hooks import (
+    collect_submodules, collect_dynamic_libs, collect_data_files,
+)
+
+extra_hiddenimports = (
+    collect_submodules('numba')
+    + collect_submodules('llvmlite')
+)
+
+extra_binaries = (
+    collect_dynamic_libs('numba')
+    + collect_dynamic_libs('llvmlite')
+)
+
+# Only collect data files that have relative dest paths
+# (absolute paths crash the BUNDLE symlink logic)
+_raw_datas = collect_data_files('numba') + collect_data_files('llvmlite')
+extra_datas = []
+for entry in _raw_datas:
+    # entry = (source_path, dest_dir) — filter out absolute dests
+    dest = entry[1] if len(entry) >= 2 else ''
+    if os.path.isabs(dest):
+        continue
+    extra_datas.append(entry)
+
 a = Analysis(
     ['lanczos_app.py'],
     pathex=['.'],
-    binaries=[],
-    datas=[],
+    binaries=extra_binaries,
+    datas=extra_datas,
     hiddenimports=[
-        # Numba and LLVM
-        'numba',
-        'numba.core',
-        'numba.core.types',
-        'numba.np.ufunc',
-        'numba.typed',
-        'llvmlite',
-        'llvmlite.binding',
         # SciPy sparse
         'scipy.sparse',
         'scipy.sparse.linalg',
@@ -62,10 +77,11 @@ a = Analysis(
         'lanczos_ed.solvers.matrix_free',
         'lanczos_ed.observables',
         'lanczos_ed.observables.basic',
+        'lanczos_ed.observables.ppee',
         'lanczos_ed.observables.tee',
         'lanczos_ed.gui',
         'lanczos_ed.gui.main_window',
-    ],
+    ] + extra_hiddenimports,
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
@@ -75,11 +91,9 @@ a = Analysis(
         'IPython',
         'jupyter',
         'notebook',
-        # Exclude Qt bindings we don't use (PyInstaller can't bundle two)
         'PyQt5',
         'PyQt6',
         'qtpy',
-        # Heavy packages pulled in by conda but not needed
         'pandas',
         'sqlalchemy',
         'tables',
@@ -91,21 +105,6 @@ a = Analysis(
     cipher=block_cipher,
     noarchive=False,
 )
-
-# Collect all numba/llvmlite files (templates, runtime support, etc.)
-# Fix malformed TOC entries: collect_all can produce 2-tuples but
-# PyInstaller 6.x COLLECT expects 3-tuples (dest, source, typecode).
-from PyInstaller.utils.hooks import collect_all
-
-def _fix_toc(entries, default_type='DATA'):
-    """Ensure every TOC entry is a 3-tuple."""
-    return [(e[0], e[1], e[2] if len(e) > 2 else default_type) for e in entries]
-
-for pkg in ('numba', 'llvmlite'):
-    datas, binaries, hiddenimports = collect_all(pkg)
-    a.datas += _fix_toc(datas, 'DATA')
-    a.binaries += _fix_toc(binaries, 'BINARY')
-    a.hiddenimports += hiddenimports
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
 
@@ -119,9 +118,9 @@ exe = EXE(
     bootloader_ignore_signals=False,
     strip=False,
     upx=False,
-    console=False,      # No terminal window
+    console=False,
     disable_windowed_traceback=False,
-    argv_emulation=True,  # macOS: support drag-and-drop
+    argv_emulation=True,
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,

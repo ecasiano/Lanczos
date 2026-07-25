@@ -183,6 +183,10 @@ class SolverWorker(QThread):
             # Each l value re-uses the same ground state |ψ₀⟩.
             # =============================================================
 
+            do_spatial = p.get('compute_spatial_ee', True)
+            do_particle = p.get('compute_particle_ee', False)
+            max_sub = p.get('max_subsystem_size', None)
+
             # Density profile (independent of subregion)
             t_obs_start = time.time()
             obs_density = density_profile(ground_state_wfn, basis_for_obs)
@@ -212,21 +216,29 @@ class SolverWorker(QThread):
                 def make_subsystem(l):
                     return list(range(l))
 
-            # Optimized l-sweep: one decode pass, one SVD per l
+            # Apply user-specified max subsystem size to spatial sweep
+            if max_sub is not None and max_sub < l_max:
+                l_max = max_sub
+
+            # Spatial EE sweep (bipartite entanglement + fluctuations)
             t_sweep_start = time.time()
-            sweep_data = sweep_observables(
-                ground_state_wfn, basis_for_obs,
-                make_subsystem, l_max,
-            )
+            sweep_data = []
+            if do_spatial:
+                sweep_data = sweep_observables(
+                    ground_state_wfn, basis_for_obs,
+                    make_subsystem, l_max,
+                )
             t_sweep = time.time() - t_sweep_start
 
             # --- Particle-partitioned entanglement entropy ---
-            # Compute S₂(n_A) for all n_A = 1..N-1
             t_ppee_start = time.time()
             N_particles = getattr(basis_for_obs, 'total_particles', None)
             ppee_data = {}
-            if N_particles is not None and N_particles > 1:
-                for n_A in range(1, N_particles):
+            if do_particle and N_particles is not None and N_particles > 1:
+                n_A_max = N_particles - 1
+                if max_sub is not None and max_sub < n_A_max:
+                    n_A_max = max_sub
+                for n_A in range(1, n_A_max + 1):
                     ppee_data[n_A] = particle_partition_entropy(
                         ground_state_wfn, basis_for_obs, n_A,
                     )
@@ -494,6 +506,10 @@ class SweepWorker(QThread):
                     basis_for_obs = model.basis
 
                 # Observables
+                do_spatial = p.get('compute_spatial_ee', True)
+                do_particle = p.get('compute_particle_ee', False)
+                max_sub = p.get('max_subsystem_size', None)
+
                 obs_density = density_profile(ground_state_wfn, basis_for_obs)
 
                 if model_type == 'Kagome':
@@ -518,16 +534,24 @@ class SweepWorker(QThread):
                     def make_subsystem(l):
                         return list(range(l))
 
-                sweep_data = sweep_observables(
-                    ground_state_wfn, basis_for_obs,
-                    make_subsystem, l_max,
-                )
+                if max_sub is not None and max_sub < l_max:
+                    l_max = max_sub
+
+                sweep_data = []
+                if do_spatial:
+                    sweep_data = sweep_observables(
+                        ground_state_wfn, basis_for_obs,
+                        make_subsystem, l_max,
+                    )
 
                 # Particle-partitioned entanglement entropy
                 N_particles = getattr(basis_for_obs, 'total_particles', None)
                 ppee_data = {}
-                if N_particles is not None and N_particles > 1:
-                    for n_A_pp in range(1, N_particles):
+                if do_particle and N_particles is not None and N_particles > 1:
+                    n_A_max = N_particles - 1
+                    if max_sub is not None and max_sub < n_A_max:
+                        n_A_max = max_sub
+                    for n_A_pp in range(1, n_A_max + 1):
                         ppee_data[n_A_pp] = particle_partition_entropy(
                             ground_state_wfn, basis_for_obs, n_A_pp,
                         )
@@ -1081,6 +1105,49 @@ class MainWindow(QMainWindow):
         self.input_tee_radius.hide()
         row += 1
 
+        # --- Observable toggles ---
+        obs_group_label = QLabel("Observables:")
+        obs_group_label.setStyleSheet("font-weight: bold;")
+        grid.addWidget(obs_group_label, row, 0, 1, 2)
+        row += 1
+
+        self.checkbox_spatial_ee = QCheckBox("Spatial EE")
+        self.checkbox_spatial_ee.setChecked(True)
+        self.checkbox_spatial_ee.setToolTip(
+            "Compute spatial (bipartite) entanglement entropy S₁, S₂,\n"
+            "accessible EE, bipartite fluctuations F_A, and\n"
+            "symmetry-resolved S₂(n_A) for each subsystem size l."
+        )
+        grid.addWidget(self.checkbox_spatial_ee, row, 0, 1, 2)
+        row += 1
+
+        self.checkbox_particle_ee = QCheckBox("Particle EE")
+        self.checkbox_particle_ee.setChecked(False)
+        self.checkbox_particle_ee.setToolTip(
+            "Compute particle-partitioned entanglement entropy S₂(n_A).\n"
+            "Splits N particles into groups of n_A and N−n_A.\n"
+            "Can be slow for large systems — scales as D(n_A)²."
+        )
+        grid.addWidget(self.checkbox_particle_ee, row, 0, 1, 2)
+        row += 1
+
+        self.label_max_subsystem = QLabel("Max subsystem size:")
+        self.label_max_subsystem.setToolTip(
+            "Maximum subsystem size for observable sweeps.\n"
+            "For spatial EE: max number of sites l in the subregion.\n"
+            "For particle EE: max number of particles n_A.\n"
+            "0 = use default (L/2 for spatial, N−1 for particle)."
+        )
+        grid.addWidget(self.label_max_subsystem, row, 0)
+        self.input_max_subsystem = QSpinBox()
+        self.input_max_subsystem.setRange(0, 100)
+        self.input_max_subsystem.setValue(0)
+        self.input_max_subsystem.setToolTip(
+            "0 = default (L/2 for spatial, N−1 for particle)."
+        )
+        grid.addWidget(self.input_max_subsystem, row, 1)
+        row += 1
+
         # --- Solver selection ---
         grid.addWidget(QLabel("Solver:"), row, 0)
         self.input_solver = QComboBox()
@@ -1403,6 +1470,8 @@ class MainWindow(QMainWindow):
         else:
             model_type = '1D'
 
+        max_sub = self.input_max_subsystem.value()
+
         params = {
             'model_type': model_type,
             'hopping': self.input_hopping.value(),
@@ -1422,6 +1491,9 @@ class MainWindow(QMainWindow):
                 if self.input_solver.currentIndex() == 1
                 else 'matrix_free'
             ),
+            'compute_spatial_ee': self.checkbox_spatial_ee.isChecked(),
+            'compute_particle_ee': self.checkbox_particle_ee.isChecked(),
+            'max_subsystem_size': max_sub if max_sub > 0 else None,
         }
 
         if is_kagome:
