@@ -35,6 +35,8 @@ from ..observables.basic import (
     accessible_entanglement_entropy, sweep_observables,
     particle_partition_entropy,
 )
+from ..models.bose_hubbard_kagome import BoseHubbardKagome
+from ..observables.tee import topological_entanglement_entropy, kitaev_preskill_regions
 
 # Optional: matplotlib for plotting density profiles
 try:
@@ -67,8 +69,24 @@ class SolverWorker(QThread):
             t_start = time.time()
             model_type = p.get('model_type', '1D')
 
-            # Build the model (1D, 2D, or 3D)
-            if model_type == '3D':
+            # Build the model (1D, 2D, 3D, or Kagome)
+            if model_type == 'Kagome':
+                model = BoseHubbardKagome(
+                    linear_size=p['linear_size'],
+                    hopping=p['hopping'],
+                    interaction=p['interaction'],
+                    chemical_potential=p['chemical_potential'],
+                    max_occupation=p['max_occupation'],
+                    total_particles=p['total_particles'],
+                    boundary=p['boundary'],
+                    hardcore=p.get('hardcore', False),
+                    nn_interaction=p.get('nn_interaction', 0.0),
+                    v2_interaction=p.get('v2_interaction', 0.0),
+                    v3_interaction=p.get('v3_interaction', 0.0),
+                    cluster_charging=p.get('cluster_charging', 0.0),
+                    use_symmetry=False,
+                )
+            elif model_type == '3D':
                 model = BoseHubbard3D(
                     linear_size=p['linear_size'],
                     hopping=p['hopping'],
@@ -110,6 +128,11 @@ class SolverWorker(QThread):
 
             if solver_type == 'matrix_free':
                 # Matrix-free: H|ψ⟩ computed on-the-fly, no H stored.
+                if model_type == 'Kagome':
+                    raise ValueError(
+                        "Matrix-free solver is not supported for the "
+                        "Kagome model. Please use the Standard solver."
+                    )
                 from ..solvers.matrix_free import solve_matrix_free
                 if model_type in ('2D', '3D'):
                     model_for_mf = model  # matrix-free needs unsymmetrized
@@ -166,7 +189,14 @@ class SolverWorker(QThread):
             t_density = time.time() - t_obs_start
 
             # Determine l-sweep range and subregion generator
-            if model_type in ('2D', '3D'):
+            if model_type == 'Kagome':
+                L_lin = p['linear_size']
+                sub_type = 'sites'
+                l_max = model.num_sites // 2
+
+                def make_subsystem(l):
+                    return list(range(l))
+            elif model_type in ('2D', '3D'):
                 L_lin = p['linear_size']
                 sub_type = p.get('subregion_type',
                                  'slab' if model_type == '3D' else 'strip')
@@ -201,6 +231,30 @@ class SolverWorker(QThread):
                         ground_state_wfn, basis_for_obs, n_A,
                     )
             t_ppee = time.time() - t_ppee_start
+
+            # --- TEE (Kitaev-Preskill) for Kagome ---
+            tee_result = None
+            t_tee = 0.0
+            if model_type == 'Kagome':
+                t_tee_start = time.time()
+                tee_radius = p.get('tee_radius', 1.05)
+                try:
+                    A_sites, B_sites, C_sites = kitaev_preskill_regions(
+                        model, radius=tee_radius,
+                    )
+                    if A_sites and B_sites and C_sites:
+                        tee_result = topological_entanglement_entropy(
+                            ground_state_wfn, basis_for_obs,
+                            A_sites, B_sites, C_sites,
+                            renyi_index=1.0,
+                        )
+                        tee_result['A_sites'] = A_sites
+                        tee_result['B_sites'] = B_sites
+                        tee_result['C_sites'] = C_sites
+                except Exception as e:
+                    tee_result = {'error': str(e)}
+                t_tee = time.time() - t_tee_start
+
             t_end = time.time()
 
             # For backward compatibility, use l_max as the "primary" cut
@@ -230,9 +284,11 @@ class SolverWorker(QThread):
                 'time_density': t_density,
                 'time_sweep': t_sweep,
                 'time_ppee': t_ppee,
+                'tee': tee_result,
+                'time_tee': t_tee,
             }
 
-            if model_type in ('2D', '3D'):
+            if model_type in ('2D', '3D', 'Kagome'):
                 result['linear_size'] = p['linear_size']
 
             self.finished.emit(result)
@@ -272,7 +328,7 @@ class SweepWorker(QThread):
         the model and just rebuild the Hamiltonian.
         """
         model_type = p.get('model_type', '1D')
-        if model_type in ('2D', '3D'):
+        if model_type in ('2D', '3D', 'Kagome'):
             size_key = p.get('linear_size', 0)
         else:
             size_key = p.get('num_sites', 0)
@@ -289,7 +345,23 @@ class SweepWorker(QThread):
     def _build_model(p: dict):
         """Build a fresh model from parameters."""
         model_type = p.get('model_type', '1D')
-        if model_type == '3D':
+        if model_type == 'Kagome':
+            return BoseHubbardKagome(
+                linear_size=p['linear_size'],
+                hopping=p['hopping'],
+                interaction=p['interaction'],
+                chemical_potential=p['chemical_potential'],
+                max_occupation=p['max_occupation'],
+                total_particles=p['total_particles'],
+                boundary=p['boundary'],
+                hardcore=p.get('hardcore', False),
+                nn_interaction=p.get('nn_interaction', 0.0),
+                v2_interaction=p.get('v2_interaction', 0.0),
+                v3_interaction=p.get('v3_interaction', 0.0),
+                cluster_charging=p.get('cluster_charging', 0.0),
+                use_symmetry=False,
+            )
+        elif model_type == '3D':
             return BoseHubbard3D(
                 linear_size=p['linear_size'],
                 hopping=p['hopping'],
@@ -336,6 +408,12 @@ class SweepWorker(QThread):
         model.interaction = p['interaction']
         model.chemical_potential = p['chemical_potential']
         model._hamiltonian_matrix = None   # force rebuild
+        # Kagome extended interaction params
+        if hasattr(model, 'nn_interaction'):
+            model.nn_interaction = p.get('nn_interaction', 0.0)
+            model.v2_interaction = p.get('v2_interaction', 0.0)
+            model.v3_interaction = p.get('v3_interaction', 0.0)
+            model.cluster_charging = p.get('cluster_charging', 0.0)
 
     # -----------------------------------------------------------------
     # Main sweep loop
@@ -377,6 +455,11 @@ class SweepWorker(QThread):
                 solver_type = p.get('solver', 'standard')
 
                 if solver_type == 'matrix_free':
+                    if model_type == 'Kagome':
+                        raise ValueError(
+                            "Matrix-free solver is not supported for "
+                            "the Kagome model."
+                        )
                     from ..solvers.matrix_free import solve_matrix_free
                     if model_type in ('2D', '3D'):
                         model_for_mf = model
@@ -413,7 +496,14 @@ class SweepWorker(QThread):
                 # Observables
                 obs_density = density_profile(ground_state_wfn, basis_for_obs)
 
-                if model_type in ('2D', '3D'):
+                if model_type == 'Kagome':
+                    L_lin = p['linear_size']
+                    sub_type = 'sites'
+                    l_max = model.num_sites // 2
+
+                    def make_subsystem(l):
+                        return list(range(l))
+                elif model_type in ('2D', '3D'):
                     L_lin = p['linear_size']
                     sub_type = p.get('subregion_type',
                                      'slab' if model_type == '3D' else 'strip')
@@ -442,6 +532,22 @@ class SweepWorker(QThread):
                             ground_state_wfn, basis_for_obs, n_A_pp,
                         )
 
+                # TEE for Kagome
+                tee_result = None
+                if model_type == 'Kagome':
+                    tee_radius = p.get('tee_radius', 1.05)
+                    try:
+                        A_s, B_s, C_s = kitaev_preskill_regions(
+                            model, radius=tee_radius,
+                        )
+                        if A_s and B_s and C_s:
+                            tee_result = topological_entanglement_entropy(
+                                ground_state_wfn, basis_for_obs,
+                                A_s, B_s, C_s, renyi_index=1.0,
+                            )
+                    except Exception:
+                        pass
+
                 t_total = time.time() - t_start
 
                 # Collect result for this grid point
@@ -453,6 +559,7 @@ class SweepWorker(QThread):
                     'density': obs_density,
                     'sweep_data': sweep_data,
                     'ppee': ppee_data,
+                    'tee': tee_result,
                     'time_total': t_total,
                 }
                 all_results.append(point_result)
@@ -537,7 +644,7 @@ class SweepWorker(QThread):
                 p = r['parameters']
                 model_type = p.get('model_type', '1D')
                 # L = linear size for display
-                if model_type in ('2D', '3D'):
+                if model_type in ('2D', '3D', 'Kagome'):
                     L_disp = p.get('linear_size', 0)
                 else:
                     L_disp = p.get('num_sites', 0)
@@ -643,7 +750,7 @@ class SweepWorker(QThread):
         for r in all_results:
             p = r['parameters']
             model_type = p.get('model_type', '1D')
-            if model_type in ('2D', '3D'):
+            if model_type in ('2D', '3D', 'Kagome'):
                 L_val = p.get('linear_size', 0)
             else:
                 L_val = p.get('num_sites', 0)
@@ -753,7 +860,8 @@ class MainWindow(QMainWindow):
         grid.addWidget(QLabel("Model:"), row, 0)
         self.input_model_type = QComboBox()
         self.input_model_type.addItems([
-            "Bose-Hubbard 1D", "Bose-Hubbard 2D", "Bose-Hubbard 3D"
+            "Bose-Hubbard 1D", "Bose-Hubbard 2D", "Bose-Hubbard 3D",
+            "Kagome (TEE)"
         ])
         self.input_model_type.currentIndexChanged.connect(
             self._on_model_type_changed
@@ -885,21 +993,110 @@ class MainWindow(QMainWindow):
         self.input_subregion_l.hide()
         row += 1
 
+        # --- Kagome-specific controls (initially hidden) ---
+        self.checkbox_hardcore = QCheckBox("Hardcore bosons")
+        self.checkbox_hardcore.setChecked(True)
+        self.checkbox_hardcore.setToolTip(
+            "Hardcore: max 1 boson per site (n_max=1).\n"
+            "Required for the Z₂ topological liquid phase."
+        )
+        grid.addWidget(self.checkbox_hardcore, row, 0, 1, 2)
+        self.checkbox_hardcore.hide()
+        row += 1
+
+        # V1 (NN interaction)
+        self.label_v1 = QLabel("V₁ (NN):")
+        grid.addWidget(self.label_v1, row, 0)
+        self.input_v1 = QDoubleSpinBox()
+        self.input_v1.setRange(0.0, 100.0)
+        self.input_v1.setValue(0.0)
+        self.input_v1.setDecimals(4)
+        self.input_v1.setSingleStep(0.1)
+        self.input_v1.setToolTip("Nearest-neighbor density-density repulsion V₁")
+        grid.addWidget(self.input_v1, row, 1)
+        self.label_v1.hide()
+        self.input_v1.hide()
+        row += 1
+
+        # V2 (2NN interaction)
+        self.label_v2 = QLabel("V₂ (2NN):")
+        grid.addWidget(self.label_v2, row, 0)
+        self.input_v2 = QDoubleSpinBox()
+        self.input_v2.setRange(0.0, 100.0)
+        self.input_v2.setValue(0.0)
+        self.input_v2.setDecimals(4)
+        self.input_v2.setSingleStep(0.1)
+        self.input_v2.setToolTip("2nd-neighbor density-density repulsion V₂")
+        grid.addWidget(self.input_v2, row, 1)
+        self.label_v2.hide()
+        self.input_v2.hide()
+        row += 1
+
+        # V3 (3NN interaction)
+        self.label_v3 = QLabel("V₃ (3NN):")
+        grid.addWidget(self.label_v3, row, 0)
+        self.input_v3 = QDoubleSpinBox()
+        self.input_v3.setRange(0.0, 100.0)
+        self.input_v3.setValue(0.0)
+        self.input_v3.setDecimals(4)
+        self.input_v3.setSingleStep(0.1)
+        self.input_v3.setToolTip("3rd-neighbor density-density repulsion V₃")
+        grid.addWidget(self.input_v3, row, 1)
+        self.label_v3.hide()
+        self.input_v3.hide()
+        row += 1
+
+        # W (cluster charging)
+        self.label_cluster_w = QLabel("W (cluster):")
+        grid.addWidget(self.label_cluster_w, row, 0)
+        self.input_cluster_w = QDoubleSpinBox()
+        self.input_cluster_w.setRange(0.0, 100.0)
+        self.input_cluster_w.setValue(0.0)
+        self.input_cluster_w.setDecimals(4)
+        self.input_cluster_w.setSingleStep(0.1)
+        self.input_cluster_w.setToolTip(
+            "Hexagon cluster-charging W Σ_hex (n_hex)².\n"
+            "Route A: Isakov-Hastings-Melko, W/t ≈ 8, half filling."
+        )
+        grid.addWidget(self.input_cluster_w, row, 1)
+        self.label_cluster_w.hide()
+        self.input_cluster_w.hide()
+        row += 1
+
+        # TEE disk radius
+        self.label_tee_radius = QLabel("TEE radius:")
+        grid.addWidget(self.label_tee_radius, row, 0)
+        self.input_tee_radius = QDoubleSpinBox()
+        self.input_tee_radius.setRange(0.1, 20.0)
+        self.input_tee_radius.setValue(1.05)
+        self.input_tee_radius.setDecimals(2)
+        self.input_tee_radius.setSingleStep(0.05)
+        self.input_tee_radius.setToolTip(
+            "Radius of the Kitaev-Preskill disk (in lattice units).\n"
+            "Default 1.05 ≈ two NN shells on the kagome lattice.\n"
+            "Increase for larger L to capture more sites in the disk."
+        )
+        grid.addWidget(self.input_tee_radius, row, 1)
+        self.label_tee_radius.hide()
+        self.input_tee_radius.hide()
+        row += 1
+
         # --- Solver selection ---
         grid.addWidget(QLabel("Solver:"), row, 0)
         self.input_solver = QComboBox()
-        self.input_solver.addItems(["Standard", "Matrix-free"])
+        self.input_solver.addItems(["Matrix-free", "Standard"])
         self.input_solver.setToolTip(
-            "Standard: builds sparse H, uses ARPACK eigsh.\n"
-            "Matrix-free: computes H|ψ⟩ on the fly (less memory).\n"
-            "Install numba for ~50-100× speedup on matrix-free."
+            "Matrix-free (default): H|ψ⟩ on the fly via Numba.\n"
+            "  ~50-100× faster, uses far less memory.\n"
+            "Standard: builds full sparse H, uses ARPACK eigsh.\n"
+            "  Required for Kagome and FCI models."
         )
         grid.addWidget(self.input_solver, row, 1)
         row += 1
 
         # --- Symmetry reduction ---
         self.checkbox_symmetry = QCheckBox("Use symmetry (T+R)")
-        self.checkbox_symmetry.setChecked(False)
+        self.checkbox_symmetry.setChecked(True)
         self.checkbox_symmetry.setToolTip(
             "Exploit translational symmetry to reduce Hilbert space.\n"
             "1D: T+R (translation + reflection), up to 2L× reduction.\n"
@@ -958,6 +1155,8 @@ class MainWindow(QMainWindow):
              (2, 30, None, 4, 12)),
             ('max_occupation', 'n_max', 'int',
              (1, 20, None, 1, 5)),
+            ('nn_interaction', 'V₁ (NN repulsion)', 'double',
+             (0.0, 100.0, 4, 0.0, 12.0)),
         ]
 
         self._sweep_widgets = {}  # key -> {checkbox, start, end, npts, spacing}
@@ -1063,26 +1262,50 @@ class MainWindow(QMainWindow):
         return self.tabs
 
     def _on_model_type_changed(self, index):
-        """Show/hide 1D vs 2D/3D controls based on model selection."""
+        """Show/hide controls based on model selection."""
         is_1d = (index == 0)
         is_2d = (index == 1)
         is_3d = (index == 2)
+        is_kagome = (index == 3)
         is_higher_d = is_2d or is_3d
 
         # 1D controls
         self.label_num_sites.setVisible(is_1d)
         self.input_num_sites.setVisible(is_1d)
 
-        # 2D/3D controls (shared: linear size and subregion)
-        self.label_linear_size.setVisible(is_higher_d)
-        self.input_linear_size.setVisible(is_higher_d)
+        # 2D/3D/Kagome controls (shared: linear size)
+        self.label_linear_size.setVisible(is_higher_d or is_kagome)
+        self.input_linear_size.setVisible(is_higher_d or is_kagome)
+
+        # Subregion controls: 2D/3D only (not kagome - kagome uses KP regions)
         self.label_subregion_type.setVisible(is_higher_d)
         self.input_subregion_type.setVisible(is_higher_d)
         self.label_subregion_l.setVisible(is_higher_d)
         self.input_subregion_l.setVisible(is_higher_d)
 
+        # Kagome-specific controls
+        self.checkbox_hardcore.setVisible(is_kagome)
+        self.label_v1.setVisible(is_kagome)
+        self.input_v1.setVisible(is_kagome)
+        self.label_v2.setVisible(is_kagome)
+        self.input_v2.setVisible(is_kagome)
+        self.label_v3.setVisible(is_kagome)
+        self.input_v3.setVisible(is_kagome)
+        self.label_cluster_w.setVisible(is_kagome)
+        self.input_cluster_w.setVisible(is_kagome)
+        self.label_tee_radius.setVisible(is_kagome)
+        self.input_tee_radius.setVisible(is_kagome)
+
         # Update linear size range and tooltip
-        if is_3d:
+        if is_kagome:
+            self.input_linear_size.setRange(2, 4)
+            self.input_linear_size.setValue(2)
+            self.label_linear_size.setToolTip("L × L kagome lattice (3L² sites)")
+            self.input_linear_size.setToolTip(
+                "L × L kagome lattice.\n"
+                "L=2: 12 sites, L=3: 27 sites, L=4: 48 sites."
+            )
+        elif is_3d:
             self.input_linear_size.setRange(2, 6)
             self.input_linear_size.setValue(2)
             self.label_linear_size.setToolTip("L × L × L cubic lattice")
@@ -1099,7 +1322,7 @@ class MainWindow(QMainWindow):
                 "L=3: 9 sites, L=4: 16 sites."
             )
 
-        # Update subregion type options
+        # Update subregion type options (2D/3D only)
         self.input_subregion_type.clear()
         if is_3d:
             self.input_subregion_type.addItems(["Slab", "Column", "Cube"])
@@ -1114,6 +1337,14 @@ class MainWindow(QMainWindow):
                 "Strip: all sites with x < l (vertical slab, l×L sites).\n"
                 "Square: all sites with x < l AND y < l (corner block, l×l sites)."
             )
+
+        # Auto-select solver: matrix-free for BH, standard for Kagome
+        if is_kagome:
+            self.input_solver.setCurrentIndex(1)  # Standard
+            self.input_solver.setEnabled(False)
+        else:
+            self.input_solver.setCurrentIndex(0)  # Matrix-free
+            self.input_solver.setEnabled(True)
 
         self._update_symmetry_availability()
 
@@ -1160,8 +1391,12 @@ class MainWindow(QMainWindow):
         is_2d = (model_index == 1)
         is_3d = (model_index == 2)
 
+        is_kagome = (model_index == 3)
+
         # Map model index to type string
-        if is_3d:
+        if is_kagome:
+            model_type = 'Kagome'
+        elif is_3d:
             model_type = '3D'
         elif is_2d:
             model_type = '2D'
@@ -1183,13 +1418,24 @@ class MainWindow(QMainWindow):
             'num_eigenvalues': self.input_num_eigenvalues.value(),
             'use_symmetry': self.checkbox_symmetry.isChecked(),
             'solver': (
-                'matrix_free'
+                'standard'
                 if self.input_solver.currentIndex() == 1
-                else 'standard'
+                else 'matrix_free'
             ),
         }
 
-        if is_3d:
+        if is_kagome:
+            L = self.input_linear_size.value()
+            params['linear_size'] = L
+            params['num_sites'] = 3 * L * L
+            params['hardcore'] = self.checkbox_hardcore.isChecked()
+            params['nn_interaction'] = self.input_v1.value()
+            params['v2_interaction'] = self.input_v2.value()
+            params['v3_interaction'] = self.input_v3.value()
+            params['cluster_charging'] = self.input_cluster_w.value()
+            params['tee_radius'] = self.input_tee_radius.value()
+            params['boundary'] = 'pbc'  # kagome only supports PBC
+        elif is_3d:
             L = self.input_linear_size.value()
             params['linear_size'] = L
             params['num_sites'] = L ** 3
@@ -1344,6 +1590,9 @@ class MainWindow(QMainWindow):
                         p['linear_size'] = L_val
                         p['num_sites'] = L_val ** 2
                         p['subregion_l'] = L_val // 2
+                    elif model_type == 'Kagome':
+                        p['linear_size'] = L_val
+                        p['num_sites'] = 3 * L_val * L_val
                     elif model_type == '3D':
                         p['linear_size'] = L_val
                         p['num_sites'] = L_val ** 3
@@ -1415,6 +1664,8 @@ class MainWindow(QMainWindow):
 
         if model_type == '1D':
             size_str = f"L={p['num_sites']}"
+        elif model_type == 'Kagome':
+            size_str = f"L={p['linear_size']} (kagome, {3*p['linear_size']**2} sites)"
         else:
             size_str = f"L={p.get('linear_size', '?')}"
 
@@ -1440,7 +1691,7 @@ class MainWindow(QMainWindow):
             p = r['parameters']
             mt = p.get('model_type', '1D')
             L_val = p.get('linear_size', p.get('num_sites', 0)) \
-                if mt in ('2D', '3D') else p.get('num_sites', 0)
+                if mt in ('2D', '3D', 'Kagome') else p.get('num_sites', 0)
             by_L[L_val].append(r)
 
         save_msg = f"Results saved to: {self.sweep_worker.save_path}"
@@ -1467,6 +1718,7 @@ class MainWindow(QMainWindow):
         model_type = result.get('model_type', '1D')
         is_2d = (model_type == '2D')
         is_3d = (model_type == '3D')
+        is_kagome = (model_type == 'Kagome')
 
         lines = []
         lines.append(f"Model: {result['model_description']}")
@@ -1506,6 +1758,10 @@ class MainWindow(QMainWindow):
         if 'time_ppee' in result:
             timing_parts.append(
                 f"PPEE {result['time_ppee']:.3f}s"
+            )
+        if 'time_tee' in result and result['time_tee'] > 0:
+            timing_parts.append(
+                f"TEE {result['time_tee']:.3f}s"
             )
         if timing_parts:
             lines.append(f"  Breakdown: {' | '.join(timing_parts)}")
@@ -1583,7 +1839,13 @@ class MainWindow(QMainWindow):
         sweep_data = result.get('sweep_data', [])
         sub_type = result.get('subregion_type', 'strip')
 
-        if is_3d:
+        if is_kagome:
+            L_lin = result.get('linear_size', 2)
+            lines.append(
+                f"Subregion: sites 0..l-1 (kagome L={L_lin}, "
+                f"{3*L_lin*L_lin} sites)"
+            )
+        elif is_3d:
             L_lin = result.get('linear_size', 2)
             sub_desc = {
                 'slab': 'x < l  (l×L×L sites)',
@@ -1652,6 +1914,38 @@ class MainWindow(QMainWindow):
                 lines.append(
                     f"  {n_A:5d}  {ppee_data[n_A]:14.10f}"
                 )
+
+        # TEE (Kitaev-Preskill) results
+        tee = result.get('tee')
+        if tee and 'error' not in tee:
+            lines.append("")
+            lines.append("Topological Entanglement Entropy (Kitaev-Preskill):")
+            lines.append(f"  γ       = {tee['gamma']:14.10f}")
+            lines.append(f"  γ_acc   = {tee['gamma_acc']:14.10f}")
+            lines.append(f"  γ_H     = {tee['gamma_H']:14.10f}  "
+                         f"(= γ − γ_acc)")
+            lines.append("")
+            lines.append("  Region entropies:")
+            lines.append(f"  {'Region':>6s}  {'S':>14s}  "
+                         f"{'S_acc':>14s}  {'H':>14s}")
+            lines.append("  " + "-" * 53)
+            for name in ['A', 'B', 'C', 'AB', 'BC', 'AC', 'ABC']:
+                lines.append(
+                    f"  {name:>6s}  {tee['S'][name]:14.10f}  "
+                    f"{tee['S_acc'][name]:14.10f}  "
+                    f"{tee['H'][name]:14.10f}"
+                )
+            # Region sizes
+            if 'A_sites' in tee:
+                lines.append("")
+                lines.append(
+                    f"  KP disk: |A|={len(tee['A_sites'])}, "
+                    f"|B|={len(tee['B_sites'])}, "
+                    f"|C|={len(tee['C_sites'])}"
+                )
+        elif tee and 'error' in tee:
+            lines.append("")
+            lines.append(f"TEE error: {tee['error']}")
 
         self.text_results.setText("\n".join(lines))
 

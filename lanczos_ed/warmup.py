@@ -66,7 +66,7 @@ def warmup(on_progress=None):
         total_bits = np.int64(4 + 4)  # N + L
         find_cycles(basis_1d, use_reflection=True)
         # Trigger build_reduced_hamiltonian via a tiny 1D model
-        from .models.bose_hubbard_1d import BoseHubbard1D
+        from .models.bose_hubbard import BoseHubbard1D
         m1d = BoseHubbard1D(
             num_sites=4, hopping=1.0, interaction=1.0,
             total_particles=4, boundary='pbc', use_symmetry=True,
@@ -124,15 +124,25 @@ def warmup(on_progress=None):
         pass
 
     # ------------------------------------------------------------------
-    # 6. Matrix-free matvec (if available)
+    # 6. Matrix-free Numba kernels (_apply_H_numba, _apply_H_numba_nn)
     # ------------------------------------------------------------------
     _report("Matrix-free solver")
     try:
-        from .solvers.matrix_free import MatrixFreeHamiltonian
+        from .solvers.matrix_free import solve_matrix_free
         if 'm1d' in dir():
-            mfh = MatrixFreeHamiltonian(m1d)
-            x = np.random.randn(m1d.dim)
-            mfh.matvec(x)
+            # Build a small non-symmetrized model so matrix-free can run
+            m1d_nosym = BoseHubbard1D(
+                num_sites=4, hopping=1.0, interaction=1.0,
+                total_particles=4, boundary='pbc', use_symmetry=False,
+            )
+            solve_matrix_free(m1d_nosym, num_eigenvalues=1)
+            # Also trigger the NN-interaction kernel
+            m1d_nn = BoseHubbard1D(
+                num_sites=4, hopping=1.0, interaction=1.0,
+                total_particles=4, boundary='pbc', use_symmetry=False,
+                nn_interaction=1.0,
+            )
+            solve_matrix_free(m1d_nn, num_eigenvalues=1)
     except Exception:
         pass
 

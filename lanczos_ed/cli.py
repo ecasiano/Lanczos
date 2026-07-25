@@ -38,7 +38,7 @@ def parse_args(argv=None):
     # Model selection
     parser.add_argument(
         "--model", default="bose_hubbard",
-        choices=["bose_hubbard"],
+        choices=["bose_hubbard", "fci"],
         help="Model to diagonalize (default: bose_hubbard)",
     )
 
@@ -83,6 +83,32 @@ def parse_args(argv=None):
              "Default: 0.0 (standard Bose-Hubbard)",
     )
 
+    # FCI parameters
+    parser.add_argument(
+        "--N1", type=int, default=3,
+        help="FCI torus dimension N₁ (default: 3)",
+    )
+    parser.add_argument(
+        "--N2", type=int, default=4,
+        help="FCI torus dimension N₂ (default: 4)",
+    )
+    parser.add_argument(
+        "--phi", type=float, default=5*np.pi/4,
+        help="FCI hopping phase φ (default: 5π/4)",
+    )
+    parser.add_argument(
+        "--kappa", type=float, default=0.0,
+        help="FCI band dispersion weight κ (0 = flat band, default: 0)",
+    )
+    parser.add_argument(
+        "--kp_radius", type=float, default=1.0,
+        help="Kitaev-Preskill disk radius for TEE (default: 1.0)",
+    )
+    parser.add_argument(
+        "--tee", action="store_true",
+        help="Compute Kitaev-Preskill TEE decomposition (FCI only)",
+    )
+
     # Ensemble
     parser.add_argument(
         "--N", type=int, default=None,
@@ -118,18 +144,120 @@ def parse_args(argv=None):
         return args
 
     # In CLI mode, validate required parameters
-    if args.L is None:
-        parser.error("--L is required for CLI mode")
-    if not args.grand_canonical and args.N is None:
-        parser.error(
-            "Must specify --N for canonical ensemble, or use --grand_canonical"
-        )
-    if args.grand_canonical and args.n_max is None:
-        parser.error(
-            "Must specify --n_max for grand canonical ensemble"
-        )
+    if args.model == "fci":
+        # FCI uses --N1, --N2 instead of --L, --N
+        pass
+    else:
+        if args.L is None:
+            parser.error("--L is required for CLI mode")
+        if not args.grand_canonical and args.N is None:
+            parser.error(
+                "Must specify --N for canonical ensemble, "
+                "or use --grand_canonical"
+            )
+        if args.grand_canonical and args.n_max is None:
+            parser.error(
+                "Must specify --n_max for grand canonical ensemble"
+            )
 
     return args
+
+
+def _run_fci(args):
+    """Run the Fractional Chern Insulator workflow.
+
+    Builds the band-projected Hamiltonian, solves for the ground state,
+    transforms to real space, and computes the entanglement decomposition
+    S = S_acc + H (and optionally KP TEE).
+    """
+    from .models.fractional_chern import FractionalChernInsulator
+    from .observables.basic import (
+        entanglement_entropy, accessible_entanglement_entropy,
+    )
+
+    time_start = time.time()
+
+    # Build model
+    model = FractionalChernInsulator(
+        N1=args.N1, N2=args.N2,
+        hopping_phase=args.phi,
+        interaction=1.0,
+        band_dispersion_weight=args.kappa,
+    )
+
+    # Solve for ground state(s)
+    num_eig = max(args.num_states, 6)
+    eigenvalues, eigenvectors = model.solve(num_eigenvalues=num_eig)
+    time_solve = time.time()
+
+    print(f"\nEigenvalues (lowest {min(8, len(eigenvalues))}):")
+    for i in range(min(8, len(eigenvalues))):
+        print(f"  E_{i} = {eigenvalues[i]:.10f}")
+
+    spread = eigenvalues[2] - eigenvalues[0]
+    gap_3 = eigenvalues[3] - eigenvalues[2]
+    print(f"\n  3-fold GSD spread  δ₃ = {spread:.6e}")
+    print(f"  Gap above triplet  Δ₃ = {gap_3:.6f}")
+    print(f"  δ₃/Δ₃             = {spread/gap_3:.6e}")
+    print(f"  Solve time: {time_solve - time_start:.1f}s")
+
+    # Transform ground state to real space
+    psi_k = eigenvectors[:, 0]
+    psi_real, real_basis = model.transform_to_real_space(psi_k)
+    time_transform = time.time()
+    print(f"  Transform time: {time_transform - time_solve:.1f}s")
+
+    # Bipartite entanglement (half-system cut)
+    N_sites = model.N_sites
+    subsys_half = list(range(N_sites // 2))
+
+    S = entanglement_entropy(psi_real, real_basis, subsys_half, renyi_index=1)
+    Sacc = accessible_entanglement_entropy(
+        psi_real, real_basis, subsys_half, renyi_index=1
+    )
+    H = S - Sacc
+    print(f"\nBipartite entanglement ({len(subsys_half)} of {N_sites} sites):")
+    print(f"  S     = {S:.6f}")
+    print(f"  S_acc = {Sacc:.6f}")
+    print(f"  H     = {H:.6f}")
+
+    # Kitaev-Preskill TEE decomposition
+    if args.tee:
+        from .observables.tee import (
+            kitaev_preskill_regions, topological_entanglement_entropy,
+        )
+        # kitaev_preskill_regions expects an object with .positions()
+        # We use the model itself (it has .positions())
+        regA, regB, regC = kitaev_preskill_regions(
+            model, radius=args.kp_radius
+        )
+        disk = regA + regB + regC
+        env = [s for s in range(N_sites) if s not in set(disk)]
+
+        print(f"\nKP TEE (radius={args.kp_radius}):")
+        print(f"  Disk: {len(disk)} sites "
+              f"({len(regA)}+{len(regB)}+{len(regC)})")
+        print(f"  Environment: {len(env)} sites")
+
+        if len(regA) == 0 or len(regB) == 0 or len(regC) == 0:
+            print("  ERROR: empty KP region — increase radius")
+        elif len(env) < 3:
+            print("  WARNING: very small environment — TEE may not converge")
+        else:
+            result = topological_entanglement_entropy(
+                psi_real, real_basis, regA, regB, regC,
+            )
+            gamma = result['gamma']
+            gamma_acc = result['gamma_acc']
+            gamma_H = result['gamma_H']
+            target = 0.5 * np.log(3)
+
+            print(f"\n  γ       = {gamma:.6f}  (target: {target:.6f})")
+            print(f"  γ_acc   = {gamma_acc:.6f}")
+            print(f"  γ_H     = {gamma_H:.6f}")
+
+    total_time = time.time() - time_start
+    print(f"\nTotal time: {total_time:.1f}s")
 
 
 def main(argv=None):
@@ -140,6 +268,11 @@ def main(argv=None):
     if args.gui:
         from .gui.main_window import run_gui
         run_gui()
+        return
+
+    # FCI model has its own workflow
+    if args.model == "fci":
+        _run_fci(args)
         return
 
     # Pre-compile Numba kernels (blocking for CLI so first run is fast)
