@@ -922,7 +922,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.label_num_sites, row, 0)
         self.input_num_sites = QSpinBox()
         self.input_num_sites.setRange(2, 30)
-        self.input_num_sites.setValue(6)
+        self.input_num_sites.setValue(4)
         grid.addWidget(self.input_num_sites, row, 1)
         row += 1
 
@@ -999,7 +999,7 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.label_particles, row, 0)
         self.input_total_particles = QSpinBox()
         self.input_total_particles.setRange(1, 100)
-        self.input_total_particles.setValue(3)
+        self.input_total_particles.setValue(4)
         grid.addWidget(self.input_total_particles, row, 1)
         row += 1
 
@@ -1216,6 +1216,14 @@ class MainWindow(QMainWindow):
         self.button_stop.setToolTip("Cancel the running calculation.")
         self.button_stop.clicked.connect(self._stop_calculation)
         grid.addWidget(self.button_stop, row, 1)
+        row += 1
+
+        # --- Save button ---
+        self.button_save = QPushButton("Save Results")
+        self.button_save.setEnabled(False)
+        self.button_save.setToolTip("Save the results to a .dat file.")
+        self.button_save.clicked.connect(self._save_single_results)
+        grid.addWidget(self.button_save, row, 0, 1, 2)
         row += 1
 
         # --- Progress bar (hidden until sweep runs) ---
@@ -1831,10 +1839,31 @@ class MainWindow(QMainWindow):
             f"{save_msg}"
         )
 
+    def _save_single_results(self):
+        """Save the last single-run results to a .dat file."""
+        if not hasattr(self, '_last_result') or self._last_result is None:
+            return
+
+        save_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Results",
+            str(Path.home() / "lanczos_results.dat"),
+            "Data files (*.dat);;Text files (*.txt);;All files (*)",
+        )
+        if not save_path:
+            return
+
+        # Write the same text that's displayed in the Results tab
+        with open(save_path, 'w') as f:
+            f.write(self.text_results.toPlainText())
+
+        self.statusBar().showMessage(f"Saved to {save_path}", 5000)
+
     def _display_results(self, result: dict):
         """Format and show results in the text tab and plot tab."""
         self.button_run.setEnabled(True)
         self.button_stop.setEnabled(False)
+        self.button_save.setEnabled(True)
+        self._last_result = result
         self.statusBar().showMessage("Done", 5000)
 
         params = self._collect_parameters()

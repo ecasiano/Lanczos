@@ -39,3 +39,6 @@ icons/icon_1024.png
 # Numba cache
 *.nbi
 *.nbc
+
+# Release notes (local only)
+NEXT_RELEASE.md
