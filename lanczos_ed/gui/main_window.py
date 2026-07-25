@@ -56,12 +56,16 @@ class SolverWorker(QThread):
         - Matrix-free:  compute H|ψ⟩ on-the-fly, no H stored
     And optional symmetry reduction (q=0, R=+1 sector for PBC).
     """
-    finished = Signal(dict)
+    result_ready = Signal(dict)
     error = Signal(str)
 
     def __init__(self, parameters: dict):
         super().__init__()
         self.parameters = parameters
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     def run(self):
         try:
@@ -121,6 +125,8 @@ class SolverWorker(QThread):
                 )
 
             t_basis = time.time()
+            if self._cancelled:
+                return
 
             # Solve for eigenvalues/eigenvectors
             num_evals = p.get('num_eigenvalues', 1)
@@ -173,6 +179,8 @@ class SolverWorker(QThread):
                 basis_for_obs = model.basis
 
             t_solve = time.time()
+            if self._cancelled:
+                return
 
             # =============================================================
             # Observables: single diagonalization, sweep over l values
@@ -239,10 +247,14 @@ class SolverWorker(QThread):
                 if max_sub is not None and max_sub < n_A_max:
                     n_A_max = max_sub
                 for n_A in range(1, n_A_max + 1):
+                    if self._cancelled:
+                        return
                     ppee_data[n_A] = particle_partition_entropy(
                         ground_state_wfn, basis_for_obs, n_A,
                     )
             t_ppee = time.time() - t_ppee_start
+            if self._cancelled:
+                return
 
             # --- TEE (Kitaev-Preskill) for Kagome ---
             tee_result = None
@@ -303,7 +315,7 @@ class SolverWorker(QThread):
             if model_type in ('2D', '3D', 'Kagome'):
                 result['linear_size'] = p['linear_size']
 
-            self.finished.emit(result)
+            self.result_ready.emit(result)
 
         except Exception as e:
             import traceback
@@ -325,6 +337,10 @@ class SweepWorker(QThread):
         super().__init__()
         self.param_grid = param_grid
         self.save_path = save_path
+        self._cancelled = False
+
+    def cancel(self):
+        self._cancelled = True
 
     # -----------------------------------------------------------------
     # Basis-reuse helpers
@@ -449,6 +465,8 @@ class SweepWorker(QThread):
             cached_model = None
 
             for idx, p in enumerate(self.param_grid):
+                if self._cancelled:
+                    break
                 t_start = time.time()
                 model_type = p.get('model_type', '1D')
 
@@ -552,9 +570,14 @@ class SweepWorker(QThread):
                     if max_sub is not None and max_sub < n_A_max:
                         n_A_max = max_sub
                     for n_A_pp in range(1, n_A_max + 1):
+                        if self._cancelled:
+                            break
                         ppee_data[n_A_pp] = particle_partition_entropy(
                             ground_state_wfn, basis_for_obs, n_A_pp,
                         )
+
+                if self._cancelled:
+                    break
 
                 # TEE for Kagome
                 tee_result = None
@@ -592,8 +615,9 @@ class SweepWorker(QThread):
                 # Free per-point temporaries to reduce memory pressure
                 gc.collect()
 
-            # Write results to .dat file
-            self._save_results(all_results)
+            # Write results to .dat file (even if cancelled — save partial)
+            if all_results:
+                self._save_results(all_results)
             self.all_finished.emit(all_results)
 
         except Exception as e:
@@ -1182,10 +1206,16 @@ class MainWindow(QMainWindow):
         grid.addWidget(self.input_num_eigenvalues, row, 1)
         row += 1
 
-        # --- Run button ---
+        # --- Run / Stop buttons ---
         self.button_run = QPushButton("Run Diagonalization")
         self.button_run.clicked.connect(self._run_diagonalization)
-        grid.addWidget(self.button_run, row, 0, 1, 2)
+        grid.addWidget(self.button_run, row, 0)
+
+        self.button_stop = QPushButton("Stop")
+        self.button_stop.setEnabled(False)
+        self.button_stop.setToolTip("Cancel the running calculation.")
+        self.button_stop.clicked.connect(self._stop_calculation)
+        grid.addWidget(self.button_stop, row, 1)
         row += 1
 
         # --- Progress bar (hidden until sweep runs) ---
@@ -1581,13 +1611,32 @@ class MainWindow(QMainWindow):
                 return
 
         self.button_run.setEnabled(False)
+        self.button_stop.setEnabled(True)
         self.statusBar().showMessage("Running diagonalization...")
         self.text_results.clear()
 
         self.worker = SolverWorker(parameters)
-        self.worker.finished.connect(self._display_results)
+        self.worker.result_ready.connect(self._display_results)
         self.worker.error.connect(self._display_error)
+        # QThread.finished fires when run() exits — handles cancellation
+        self.worker.finished.connect(self._on_worker_done)
         self.worker.start()
+
+    def _stop_calculation(self):
+        """Cancel a running single or sweep calculation."""
+        if self.worker is not None and self.worker.isRunning():
+            self.worker.cancel()
+            self.statusBar().showMessage("Cancelling…")
+        if self.sweep_worker is not None and self.sweep_worker.isRunning():
+            self.sweep_worker.cancel()
+            self.statusBar().showMessage("Cancelling sweep…")
+
+    def _on_worker_done(self):
+        """Reset UI when the solver thread exits (normal or cancelled)."""
+        self.button_run.setEnabled(True)
+        self.button_stop.setEnabled(False)
+        if self.worker and self.worker._cancelled:
+            self.statusBar().showMessage("Cancelled", 5000)
 
     # -----------------------------------------------------------------
     #  Sweep mode
@@ -1708,6 +1757,7 @@ class MainWindow(QMainWindow):
             return
 
         self.button_run.setEnabled(False)
+        self.button_stop.setEnabled(True)
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, total)
         self.progress_bar.setValue(0)
@@ -1749,8 +1799,9 @@ class MainWindow(QMainWindow):
         )
 
     def _on_sweep_done(self, all_results):
-        """Called when the full sweep finishes."""
+        """Called when the full sweep finishes (or is cancelled)."""
         self.button_run.setEnabled(True)
+        self.button_stop.setEnabled(False)
         self.progress_bar.setVisible(False)
         total = len(all_results)
         total_time = sum(r['time_total'] for r in all_results)
@@ -1783,6 +1834,7 @@ class MainWindow(QMainWindow):
     def _display_results(self, result: dict):
         """Format and show results in the text tab and plot tab."""
         self.button_run.setEnabled(True)
+        self.button_stop.setEnabled(False)
         self.statusBar().showMessage("Done", 5000)
 
         params = self._collect_parameters()
@@ -2094,6 +2146,7 @@ class MainWindow(QMainWindow):
     def _display_error(self, message: str):
         """Show an error dialog if the solver fails."""
         self.button_run.setEnabled(True)
+        self.button_stop.setEnabled(False)
         self.statusBar().showMessage("Error", 5000)
         QMessageBox.critical(self, "Error", f"Solver error:\n{message}")
 
