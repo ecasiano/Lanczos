@@ -651,7 +651,8 @@ def accessible_entanglement_entropy(wavefunction: np.ndarray, basis,
 
 def particle_partition_entropy(wavefunction: np.ndarray, basis,
                                 n_A: int,
-                                renyi_index: float = 2.0) -> float:
+                                renyi_index: float = 2.0,
+                                verbose: bool = False) -> float:
     """Compute the particle-partitioned Rényi entanglement entropy.
 
     Splits N identical bosons into a group of n_A and a group of
@@ -670,6 +671,11 @@ def particle_partition_entropy(wavefunction: np.ndarray, basis,
 
     Then S_alpha(n_A) is the Rényi-alpha entropy of rho_A.
 
+    For large systems (dim > 100k) and Numba-accelerated bases, this
+    automatically dispatches to the chunked BLAS implementation in
+    ppee.py, which replaces O(D_A * D_B) Python get_index() calls
+    with O(1) rank-indexed lookups and BLAS matrix accumulation.
+
     Reference:
         Herdman, Tulin, Gingras & Del Maestro, PRB 94, 064524 (2016)
 
@@ -683,12 +689,22 @@ def particle_partition_entropy(wavefunction: np.ndarray, basis,
         Number of particles in partition A (1 <= n_A <= N-1).
     renyi_index : float
         Rényi index alpha (default 2.0).
+    verbose : bool
+        Print progress (only used by the chunked BLAS path).
 
     Returns
     -------
     S_alpha_n : float
         Rényi-alpha particle-partition entanglement entropy.
     """
+    # ---- dispatch to chunked BLAS for large Numba-backed bases ----
+    if _can_use_numba(basis) and basis.dim > 100_000:
+        from .ppee import compute_ppee
+        result = compute_ppee(wavefunction, basis, n_A,
+                              renyi_index=renyi_index, verbose=verbose)
+        return result['S_alpha']
+
+    # ---- original Python path for small systems ----
     from math import comb as _comb
 
     num_sites = basis.num_sites

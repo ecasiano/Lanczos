@@ -1,0 +1,103 @@
+name: Build Desktop App
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller Pillow
+
+      - name: Generate icon
+        run: python build_icon.py
+
+      - name: Build app
+        run: pyinstaller --noconfirm LanczosED.spec
+
+      - name: Create DMG
+        run: |
+          brew install create-dmg || true
+          create-dmg \
+            --volname "Lanczos ED" \
+            --window-pos 200 120 \
+            --window-size 600 400 \
+            --icon-size 100 \
+            --icon "Lanczos ED.app" 175 190 \
+            --app-drop-link 425 190 \
+            "Lanczos.ED.dmg" \
+            "dist/Lanczos ED.app"
+
+      - name: Upload DMG
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Lanczos.ED.dmg
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller Pillow
+
+      - name: Build exe
+        run: pyinstaller --noconfirm LanczosED.spec
+
+      - name: Zip dist
+        run: Compress-Archive -Path "dist\LanczosED\*" -DestinationPath Lanczos.ED.Windows.zip
+
+      - name: Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Lanczos.ED.Windows.zip
+
+  build-linux:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libegl1 libxkbcommon0
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install pyinstaller Pillow
+
+      - name: Build
+        run: pyinstaller --noconfirm LanczosED.spec
+
+      - name: Package as tar.gz
+        run: tar -czf Lanczos.ED.Linux.tar.gz -C dist LanczosED
+
+      - name: Upload
+        uses: softprops/action-gh-release@v2
+        with:
+          files: Lanczos.ED.Linux.tar.gz

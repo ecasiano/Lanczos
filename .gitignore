@@ -30,3 +30,12 @@ sweep_results_*
 
 # Jupyter
 .ipynb_checkpoints/
+
+# PyInstaller
+*.spec.bak
+icons/*.iconset/
+icons/icon_1024.png
+
+# Numba cache
+*.nbi
+*.nbc

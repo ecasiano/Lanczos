@@ -1,26 +1,42 @@
 # Lanczos ED
 
-Exact diagonalization of the Bose-Hubbard model on 1D chains, 2D square lattices, and 3D cubic lattices using the Lanczos algorithm. Includes a PySide6 desktop GUI.
+A fast, simple desktop application for exact diagonalization of quantum lattice models. Double-click the app, pick your parameters, and go — no terminal required.
 
-## Features
+<!-- screenshot placeholder: replace with actual screenshot -->
+<!-- ![Lanczos ED screenshot](docs/screenshot.png) -->
 
-**Models** — Bose-Hubbard Hamiltonian in 1D, 2D, and 3D with periodic or open boundary conditions. Supports canonical (fixed particle number) and grand-canonical (fluctuating number) ensembles, with optional occupation truncation (`n_max`).
+## Download
 
-**Basis encoding** — States are stored as unary (balls-and-walls) integers following [Barghathi et al., PRB 105, L121116 (2022)](https://doi.org/10.1103/PhysRevB.105.L121116). Each Fock state maps to a single 64-bit integer, making enumeration, lookup, and symmetry operations efficient.
+Pre-built apps are available on the [Releases](https://github.com/ecasiano/Lanczos/releases) page:
 
-**Symmetry reduction** — Translational symmetry (with optional reflection) in 1D, and full 2D translational symmetry via bitwise orbit finding. Symmetry-reduced Hamiltonians are built in the momentum sector of interest, typically cutting the Hilbert space dimension by a factor of L (1D) or L² (2D).
+| Platform | Download |
+|----------|----------|
+| macOS    | `Lanczos.ED.dmg` |
+| Windows  | `Lanczos.ED.Setup.exe` (coming soon) |
+| Linux    | `Lanczos.ED.AppImage` (coming soon) |
 
-**Solvers** — Standard sparse diagonalization via ARPACK (`scipy.sparse.linalg.eigsh`), and a matrix-free Lanczos solver that applies the Hamiltonian on-the-fly without storing the full sparse matrix.
+On macOS, if you see "app can't be opened because it is from an unidentified developer," right-click the app and choose **Open**.
 
-**Observables** — Ground state energy, density profile ⟨n_i⟩, bipartite particle number fluctuations F_A, von Neumann and Rényi entanglement entropies (S₁, S₂) via sector-by-sector SVD, generalized accessible entanglement entropy S_α^acc ([Barghathi et al., PRB 2022](https://doi.org/10.1103/PhysRevB.105.L121116)), symmetry-resolved entanglement entropy S₂(n_A) per charge sector, and particle number distributions p(n_A).
+## What it does
 
-**Sweep mode** — Scan over ranges of U/t (or other parameters) in a single run, computing all observables for multiple subregion sizes at each point. Results are saved to `.dat` files with sector-resolved companion files.
+Lanczos ED solves quantum lattice Hamiltonians by exact diagonalization using the Lanczos algorithm. It targets small-to-moderate system sizes where the full many-body Hilbert space is tractable, and computes ground-state energies, entanglement entropies, density profiles, and topological invariants.
 
-**Numba acceleration** — Performance-critical kernels (basis enumeration, symmetry operations, observable computations) are JIT-compiled with Numba. A warmup module pre-compiles all kernels at startup so the first real calculation runs at full speed.
+### Supported models
 
-**GUI** — PySide6 desktop interface with parameter input, solver selection, symmetry toggle, sweep mode, formatted results display, and density profile plotting.
+- **Bose-Hubbard** — 1D chains, 2D square lattices, 3D cubic lattices, and the kagome lattice. Periodic or open boundary conditions, canonical or grand-canonical ensemble, tunable occupation cutoff.
+- **Fractional Chern insulator** — Kagome lattice with complex nearest-neighbor hopping (Chern band C = 1) and band-projected interactions at fractional filling ν = 1/3. Includes momentum-resolved spectrum and real-space transform for entanglement.
 
-## Installation
+### Observables
+
+Ground-state energy, density profile ⟨nᵢ⟩, bipartite particle-number fluctuations, von Neumann and Rényi entanglement entropies (S₁, S₂) via sector-by-sector SVD, accessible entanglement entropy S_acc, particle-partitioned entanglement, symmetry-resolved entanglement S₂(nₐ) per charge sector, particle-number distributions p(nₐ), and topological entanglement entropy (Kitaev-Preskill).
+
+### Performance
+
+All performance-critical kernels (basis enumeration, Hamiltonian application, symmetry operations, observable computation) are JIT-compiled with [Numba](https://numba.pydata.org). The matrix-free Lanczos solver computes H|ψ⟩ on-the-fly with parallel threads, avoiding the memory cost of storing the full sparse matrix. Translational symmetry (with optional reflection) reduces the Hilbert space by a factor of L in 1D and L² in 2D.
+
+## Running from source
+
+If you prefer to run from source rather than the desktop app:
 
 ```bash
 git clone https://github.com/ecasiano/Lanczos.git
@@ -28,32 +44,21 @@ cd Lanczos
 pip install -r requirements.txt
 ```
 
-Dependencies: `numpy`, `scipy`, `PySide6`, `matplotlib`, and optionally `numba`.
-
-## Usage
-
-### GUI
+Launch the GUI:
 
 ```bash
 python -m lanczos_ed --gui
-# or
-python -m lanczos_ed.gui
 ```
 
 ### Command line
 
 ```bash
-# Canonical ensemble: L=6 sites, N=3 particles, U/t=4
 python -m lanczos_ed --L 6 --N 3 --U 4.0
-
-# Grand canonical with occupation cap
 python -m lanczos_ed --L 4 --n_max 2 --grand_canonical --mu 0.5
-
-# Open boundary conditions
-python -m lanczos_ed --L 8 --N 4 --boundary obc
+python -m lanczos_ed --L 8 --N 4 --boundary obc --solver matrix_free
 ```
 
-### Scripting
+### As a library
 
 ```python
 from lanczos_ed.models.bose_hubbard import BoseHubbard1D
@@ -67,65 +72,50 @@ model = BoseHubbard1D(
 
 H = model.hamiltonian()
 solver = LanczosSolver(H, num_eigenvalues=1)
-evals, evecs = solver.solve()
+solver.solve()
 
 psi = model.reconstruct_wavefunction(solver.ground_state)
 results = sweep_observables(psi, model.basis, lambda l: list(range(l)), L_max=4)
 
 for r in results:
-    print(f"l={r['l']}  S₂={r['S_2']:.6f}  S₂_acc={r['S_2_acc']:.6f}  F_A={r['F_A']:.6f}")
+    print(f"l={r['l']}  S₂={r['S_2']:.6f}  S₂_acc={r['S_2_acc']:.6f}")
 ```
 
-For 2D systems:
+## Building the desktop app
 
-```python
-from lanczos_ed.models.bose_hubbard_2d import BoseHubbard2D
-
-model = BoseHubbard2D(
-    linear_size=3, hopping=1.0, interaction=10.0,
-    total_particles=9, boundary='pbc', use_symmetry=True,
-)
-
-H = model.hamiltonian()
-solver = LanczosSolver(H, num_eigenvalues=1)
-solver.solve()
-psi = model.reconstruct_wavefunction(solver.ground_state)
-```
-
-### 4×4 sweep script
-
-A ready-made sweep over U/t for the 4×4 Bose-Hubbard model at unit filling:
+To build the `.app` bundle yourself (macOS):
 
 ```bash
-python run_4x4_sweep.py
+cd Lanczos
+pip install pyinstaller Pillow
+./build_mac.sh
+open "dist/Lanczos ED.app"
 ```
-
-This produces `sweep_results_4x4.dat` and `sweep_results_4x4_sectors.dat`.
 
 ## Project structure
 
 ```
 lanczos_ed/
-├── __init__.py
-├── __main__.py              # python -m lanczos_ed entry point
-├── cli.py                   # command-line interface
 ├── basis.py                 # mixed-radix Fock basis (grand canonical)
 ├── unary_basis.py           # unary (balls-and-walls) basis encoding
 ├── symmetry.py              # 1D translational + reflection symmetry
 ├── symmetry_2d.py           # 2D translational symmetry (bitwise orbits)
-├── warmup.py                # Numba JIT pre-compilation
+├── warmup.py                # Numba JIT pre-compilation at startup
 ├── models/
 │   ├── bose_hubbard.py      # 1D Bose-Hubbard
-│   ├── bose_hubbard_2d.py   # 2D Bose-Hubbard (square lattice)
-│   └── bose_hubbard_3d.py   # 3D Bose-Hubbard (cubic lattice)
+│   ├── bose_hubbard_2d.py   # 2D square lattice
+│   ├── bose_hubbard_3d.py   # 3D cubic lattice
+│   ├── bose_hubbard_kagome.py  # kagome lattice
+│   └── fractional_chern.py  # FCI on kagome (band-projected)
 ├── solvers/
-│   ├── lanczos.py           # ARPACK sparse eigensolver wrapper
-│   └── matrix_free.py       # matrix-free Lanczos (on-the-fly matvec)
+│   ├── lanczos.py           # ARPACK sparse eigensolver
+│   └── matrix_free.py       # matrix-free Lanczos (Numba parallel)
 ├── observables/
-│   └── basic.py             # density, fluctuations, entropies, sweeps
+│   ├── basic.py             # density, fluctuations, entropies, sweeps
+│   ├── ppee.py              # particle-partitioned entropy (chunked BLAS)
+│   └── tee.py               # topological entanglement entropy
 └── gui/
-    ├── __main__.py           # python -m lanczos_ed.gui entry point
-    └── main_window.py        # PySide6 main window
+    └── main_window.py       # PySide6 desktop interface
 ```
 
 ## References
